@@ -4,7 +4,6 @@ use anyhow::Result;
 use log::{info, warn};
 use serde_json::json;
 use std::convert::Infallible;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 use warp::http::StatusCode;
 use warp::reply::{json as reply_json, with_status};

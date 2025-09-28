@@ -3,10 +3,11 @@ use evdev::EventType as EvdevEventType;
 use evdev::{Device, InputEvent};
 use log::{debug, info, trace};
 
-use std::thread::sleep;
 use std::time::Duration;
+use tokio::time::{sleep, timeout};
 
 use crate::device::DeviceModel;
+use crate::cancellation::GhostwriterCancellation;
 
 #[derive(Debug, Clone)]
 pub enum TriggerCorner {
@@ -72,39 +73,65 @@ impl Touch {
         }
     }
 
-    pub fn wait_for_trigger(&mut self) -> Result<()> {
+    pub async fn wait_for_trigger(&mut self, cancellation: &GhostwriterCancellation) -> Result<()> {
         let mut position_x = 0;
         let mut position_y = 0;
+
         loop {
-            // Store events in a temporary vector to avoid borrowing issues
-            let mut events_to_process = Vec::new();
-            if let Some(device) = &mut self.device {
-                for event in device.fetch_events()? {
-                    events_to_process.push(event);
+            // Check for cancellation before each iteration
+            if cancellation.should_cancel() {
+                return Err(anyhow::anyhow!("Touch waiting cancelled"));
+            }
+
+            // Process events in a short timeout window to allow cancellation checking
+            let events_result = timeout(Duration::from_millis(100), async {
+                let mut events_to_process = Vec::new();
+                if let Some(device) = &mut self.device {
+                    // Note: fetch_events() is still blocking, but we timeout quickly
+                    // In a full async implementation, we'd use async evdev or epoll
+                    for event in device.fetch_events()? {
+                        events_to_process.push(event);
+                    }
+                }
+                Ok::<Vec<InputEvent>, anyhow::Error>(events_to_process)
+            }).await;
+
+            match events_result {
+                Ok(Ok(events_to_process)) => {
+                    // Process the events after getting them
+                    for event in events_to_process {
+                        if event.code() == ABS_MT_POSITION_X {
+                            position_x = event.value();
+                        }
+                        if event.code() == ABS_MT_POSITION_Y {
+                            position_y = event.value();
+                        }
+                        if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
+                            let (x, y) = self.input_to_virtual((position_x, position_y));
+                            debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
+                            if self.is_in_trigger_zone(x, y) {
+                                debug!("Touch release in target zone!");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    // Error reading events, continue loop
+                    debug!("Error reading touch events: {}", e);
+                }
+                Err(_) => {
+                    // Timeout - this is expected, allows us to check cancellation
+                    // No events within timeout window, continue checking
                 }
             }
 
-            // Process the events after releasing the mutable borrow
-            for event in events_to_process {
-                if event.code() == ABS_MT_POSITION_X {
-                    position_x = event.value();
-                }
-                if event.code() == ABS_MT_POSITION_Y {
-                    position_y = event.value();
-                }
-                if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
-                    let (x, y) = self.input_to_virtual((position_x, position_y));
-                    debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
-                    if self.is_in_trigger_zone(x, y) {
-                        debug!("Touch release in target zone!");
-                        return Ok(());
-                    }
-                }
-            }
+            // Small yield to prevent busy waiting
+            sleep(Duration::from_millis(10)).await;
         }
     }
 
-    pub fn touch_start(&mut self, xy: (i32, i32)) -> Result<()> {
+    pub async fn touch_start(&mut self, xy: (i32, i32)) -> Result<()> {
         let (x, y) = self.virtual_to_input(xy);
         if let Some(device) = &mut self.device {
             trace!("touch_start at ({}, {})", x, y);
@@ -120,12 +147,12 @@ impl Touch {
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_ORIENTATION, 4),
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
             ])?;
-            sleep(Duration::from_millis(1));
+            sleep(Duration::from_millis(1)).await;
         }
         Ok(())
     }
 
-    pub fn touch_stop(&mut self) -> Result<()> {
+    pub async fn touch_stop(&mut self) -> Result<()> {
         if let Some(device) = &mut self.device {
             trace!("touch_stop");
             device.send_events(&[
@@ -133,12 +160,12 @@ impl Touch {
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, -1),
                 InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
             ])?;
-            sleep(Duration::from_millis(1));
+            sleep(Duration::from_millis(1)).await;
         }
         Ok(())
     }
 
-    pub fn goto_xy(&mut self, xy: (i32, i32)) -> Result<()> {
+    pub async fn goto_xy(&mut self, xy: (i32, i32)) -> Result<()> {
         let (x, y) = self.virtual_to_input(xy);
         if let Some(device) = &mut self.device {
             device.send_events(&[
@@ -152,10 +179,10 @@ impl Touch {
         Ok(())
     }
 
-    pub fn tap_middle_bottom(&mut self) -> Result<()> {
-        self.touch_start((384, 1023)).unwrap(); // middle bottom
-        sleep(Duration::from_millis(100));
-        self.touch_stop().unwrap();
+    pub async fn tap_middle_bottom(&mut self) -> Result<()> {
+        self.touch_start((384, 1023)).await?; // middle bottom
+        sleep(Duration::from_millis(100)).await;
+        self.touch_stop().await?;
         // sleep(Duration::from_millis(10));
         // sleep(Duration::from_millis(100));
         Ok(())

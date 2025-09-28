@@ -8,7 +8,7 @@ use serde_json::Value as json;
 pub struct Tool {
     name: String,
     definition: json,
-    callback: Option<Box<dyn FnMut(json)>>,
+    callback: Option<Box<dyn FnMut(json) + Send>>,
 }
 
 pub struct Google {
@@ -33,6 +33,7 @@ impl Google {
     }
 }
 
+#[async_trait::async_trait]
 impl LLMEngine for Google {
     fn new(options: &OptionMap) -> Self {
         let api_key = option_or_env(options, "api_key", "GOOGLE_API_KEY");
@@ -48,7 +49,7 @@ impl LLMEngine for Google {
         }
     }
 
-    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json)>) {
+    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json) + Send>) {
         self.tools.push(Tool {
             name: name.to_string(),
             definition,
@@ -75,7 +76,7 @@ impl LLMEngine for Google {
         self.content.clear();
     }
 
-    fn execute(&mut self) -> Result<()> {
+    async fn execute(&mut self, _cancellation: &crate::cancellation::GhostwriterCancellation) -> Result<()> {
         let body = json!({
             "contents": [{
                 "role": "user",

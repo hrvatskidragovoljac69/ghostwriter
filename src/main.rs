@@ -7,10 +7,11 @@ use serde::Serialize;
 use serde_json::Value as json;
 use std::sync::{Arc, Mutex, RwLock};
 
-use std::thread::sleep;
 use std::time::Duration;
+use tokio::time::sleep;
 
 use ghostwriter::{
+    cancellation::GhostwriterCancellation,
     config::Config,
     embedded_assets::load_config,
     keyboard::Keyboard,
@@ -145,7 +146,8 @@ pub struct Args {
     web_port: u16,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     dotenv().ok();
 
     let args = Args::parse();
@@ -156,7 +158,7 @@ fn main() -> Result<()> {
 
     setup_uinput()?;
 
-    ghostwriter(&args)
+    ghostwriter(&args).await
 }
 
 macro_rules! shared {
@@ -225,7 +227,7 @@ fn create_engine(engine_name: &str, engine_options: &OptionMap) -> Result<Box<dy
     }
 }
 
-fn ghostwriter(args: &Args) -> Result<()> {
+async fn ghostwriter(args: &Args) -> Result<()> {
     let config = Config::load(args)?;
 
     // Handle --save-config option
@@ -255,7 +257,7 @@ fn ghostwriter(args: &Args) -> Result<()> {
     };
 
     // Run main ghostwriter logic
-    let result = run_ghostwriter_loop(shared_config, shared_status);
+    let result = run_ghostwriter_loop(shared_config, shared_status).await;
 
     // Wait for web server thread if it exists
     if let Some(handle) = web_handle {
@@ -265,11 +267,12 @@ fn ghostwriter(args: &Args) -> Result<()> {
     result
 }
 
-fn run_ghostwriter_loop(
+async fn run_ghostwriter_loop(
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
+    let mut cancellation = GhostwriterCancellation::new();
 
     // Initialize status
     {
@@ -285,10 +288,10 @@ fn run_ghostwriter_loop(
     let touch = shared!(Touch::new(config.no_draw, trigger_corner));
 
     // Give time for the virtual keyboard to be plugged in
-    sleep(Duration::from_millis(1000));
+    sleep(Duration::from_millis(1000)).await;
 
-    lock!(touch).tap_middle_bottom()?;
-    sleep(Duration::from_millis(1000));
+    lock!(touch).tap_middle_bottom().await?;
+    sleep(Duration::from_millis(1000)).await;
 
     lock!(keyboard).progress("Keyboard loaded...")?;
 
@@ -388,11 +391,14 @@ fn run_ghostwriter_loop(
     }
 
     lock!(keyboard).progress("Tools initialized.")?;
-    sleep(Duration::from_millis(1000));
+    sleep(Duration::from_millis(1000)).await;
     lock!(keyboard).progress_end()?;
-    sleep(Duration::from_millis(1000));
+    sleep(Duration::from_millis(1000)).await;
 
     loop {
+        // Start a new execution cycle
+        cancellation.new_execution_cycle();
+
         // Check for config updates and reload if necessary
         let current_config = {
             let config_guard = shared_config.read().unwrap();
@@ -410,12 +416,14 @@ fn run_ghostwriter_loop(
             status.error = None;
         }
 
-        // Recreate devices if trigger corner changed
-        if current_config.trigger_corner != config.trigger_corner {
+        // Check if config changed and recreate touch device if needed
+        let config_changed = current_config.trigger_corner != config.trigger_corner;
+        if config_changed {
             trigger_corner = TriggerCorner::from_string(&current_config.trigger_corner)?;
-            // Note: touch device would need to be recreated here, but that's complex
-            // For now we'll just update the corner and log the change
-            info!("Trigger corner changed to: {}", current_config.trigger_corner);
+            info!("Trigger corner changed to: {}, recreating touch device", current_config.trigger_corner);
+            // Recreate touch device with new trigger corner
+            let new_touch = Touch::new(current_config.no_draw, trigger_corner);
+            *lock!(touch) = new_touch;
         }
 
         // Update our local config reference
@@ -447,7 +455,7 @@ fn run_ghostwriter_loop(
                 status.waiting_for_trigger = true;
             }
 
-            lock!(touch).wait_for_trigger()?;
+            lock!(touch).wait_for_trigger(&cancellation).await?;
 
             // Update status after trigger
             {
@@ -459,8 +467,8 @@ fn run_ghostwriter_loop(
         }
 
         // Sleep a bit to differentiate the touches
-        sleep(Duration::from_millis(100));
-        lock!(touch).tap_middle_bottom()?;
+        sleep(Duration::from_millis(100)).await;
+        lock!(touch).tap_middle_bottom().await?;
         // sleep(Duration::from_millis(1000));
         // lock!(keyboard).progress("Taking screenshot...")?;
 
@@ -551,7 +559,7 @@ fn run_ghostwriter_loop(
         info!("Executing the engine (call out to {}", engine_name);
         lock!(keyboard).progress("thinking...")?;
 
-        let execution_result = engine.execute();
+        let execution_result = engine.execute(&cancellation).await;
 
         // Update status after execution
         {
