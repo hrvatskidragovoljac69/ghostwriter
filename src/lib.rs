@@ -7,6 +7,7 @@ pub mod llm_engine;
 pub mod pen;
 pub mod screenshot;
 pub mod segmenter;
+pub mod simulation;
 pub mod status;
 pub mod touch;
 pub mod util;

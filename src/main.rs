@@ -18,6 +18,7 @@ use ghostwriter::{
     llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine},
     pen::Pen,
     screenshot::Screenshot,
+    simulation::SimulationConfig,
     segmenter::analyze_image,
     status::GhostwriterStatus,
     touch::{Touch, TriggerCorner},
@@ -144,6 +145,26 @@ pub struct Args {
     /// Port for web server (default: 8080)
     #[arg(long, default_value = "8080")]
     web_port: u16,
+
+    /// Enable test/simulation mode for off-device testing
+    #[arg(long)]
+    test_mode: bool,
+
+    /// File containing scripted touch events for simulation (JSON format)
+    #[arg(long)]
+    test_touch_events_file: Option<String>,
+
+    /// Directory containing test screenshots to cycle through
+    #[arg(long)]
+    test_screenshot_dir: Option<String>,
+
+    /// Auto-trigger delay in seconds for automated testing
+    #[arg(long)]
+    test_auto_trigger_delay: Option<u32>,
+
+    /// File to log simulated interactions to
+    #[arg(long)]
+    test_interaction_log: Option<String>,
 }
 
 #[tokio::main]
@@ -241,15 +262,30 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let shared_status = Arc::new(RwLock::new(GhostwriterStatus::default()));
 
+    // Create Touch component for web API and main loop
+    let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
+    let shared_touch = if args.web_server || config.test_mode {
+        let touch = if config.test_mode {
+            let simulation_config = SimulationConfig::from_config(&config);
+            Touch::new_simulated(simulation_config, trigger_corner)?
+        } else {
+            Touch::new(config.no_draw, trigger_corner)
+        };
+        Some(Arc::new(RwLock::new(touch)))
+    } else {
+        None
+    };
+
     // Start web server if requested
     let web_handle = if args.web_server {
         let config_clone = Arc::clone(&shared_config);
         let status_clone = Arc::clone(&shared_status);
+        let touch_clone = shared_touch.as_ref().map(|t| Arc::clone(t));
         let port = args.web_port;
 
         Some(std::thread::spawn(move || {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
-                start_web_server(port, config_clone, status_clone).await
+                start_web_server(port, config_clone, status_clone, touch_clone).await
             })
         }))
     } else {
@@ -257,7 +293,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     };
 
     // Run main ghostwriter logic
-    let result = run_ghostwriter_loop(shared_config, shared_status).await;
+    let result = run_ghostwriter_loop(shared_config, shared_status, shared_touch).await;
 
     // Wait for web server thread if it exists
     if let Some(handle) = web_handle {
@@ -270,6 +306,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
 async fn run_ghostwriter_loop(
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
+    shared_touch: Option<Arc<RwLock<Touch>>>,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
     let mut cancellation = GhostwriterCancellation::new();
@@ -283,14 +320,24 @@ async fn run_ghostwriter_loop(
 
     let mut config = shared_config.read().unwrap().clone();
     let mut trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
-    let keyboard = shared!(Keyboard::new(config.no_draw || config.no_keyboard, config.no_draw_progress,));
-    let pen = shared!(Pen::new(config.no_draw));
-    let touch = shared!(Touch::new(config.no_draw, trigger_corner));
+    let keyboard = shared!(Keyboard::new(config.test_mode || config.no_draw || config.no_keyboard, config.no_draw_progress,));
+    let pen = shared!(Pen::new(config.test_mode || config.no_draw));
+
+    let touch = if let Some(shared_touch) = shared_touch {
+        shared_touch
+    } else {
+        if config.test_mode {
+            let simulation_config = SimulationConfig::from_config(&config);
+            Arc::new(RwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
+        } else {
+            Arc::new(RwLock::new(Touch::new(config.no_draw, trigger_corner)))
+        }
+    };
 
     // Give time for the virtual keyboard to be plugged in
     sleep(Duration::from_millis(1000)).await;
 
-    lock!(touch).tap_middle_bottom().await?;
+    touch.write().unwrap().tap_middle_bottom().await?;
     sleep(Duration::from_millis(1000)).await;
 
     lock!(keyboard).progress("Keyboard loaded...")?;
@@ -421,9 +468,11 @@ async fn run_ghostwriter_loop(
         if config_changed {
             trigger_corner = TriggerCorner::from_string(&current_config.trigger_corner)?;
             info!("Trigger corner changed to: {}, recreating touch device", current_config.trigger_corner);
+            // Cancel current execution to immediately apply the change
+            cancellation.cancel_execution();
             // Recreate touch device with new trigger corner
             let new_touch = Touch::new(current_config.no_draw, trigger_corner);
-            *lock!(touch) = new_touch;
+            *touch.write().unwrap() = new_touch;
         }
 
         // Update our local config reference
@@ -455,7 +504,7 @@ async fn run_ghostwriter_loop(
                 status.waiting_for_trigger = true;
             }
 
-            lock!(touch).wait_for_trigger(&cancellation).await?;
+            touch.write().unwrap().wait_for_trigger(&cancellation).await?;
 
             // Update status after trigger
             {
@@ -468,7 +517,7 @@ async fn run_ghostwriter_loop(
 
         // Sleep a bit to differentiate the touches
         sleep(Duration::from_millis(100)).await;
-        lock!(touch).tap_middle_bottom().await?;
+        touch.write().unwrap().tap_middle_bottom().await?;
         // sleep(Duration::from_millis(1000));
         // lock!(keyboard).progress("Taking screenshot...")?;
 
@@ -483,7 +532,12 @@ async fn run_ghostwriter_loop(
         let base64_image = if let Some(input_png) = &config.input_png {
             BASE64_STANDARD.encode(std::fs::read(input_png)?)
         } else {
-            let mut screenshot = Screenshot::new()?;
+            let mut screenshot = if config.test_mode {
+                let simulation_config = SimulationConfig::from_config(&config);
+                Screenshot::new_simulated(simulation_config)?
+            } else {
+                Screenshot::new()?
+            };
             screenshot.take_screenshot()?;
             if let Some(save_screenshot) = &config.save_screenshot {
                 info!("Saving screenshot to {}", save_screenshot);

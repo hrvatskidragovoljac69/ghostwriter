@@ -1,8 +1,9 @@
 use crate::config::Config;
 use crate::status::GhostwriterStatus;
+use crate::touch::{Touch, TriggerCorner};
 use anyhow::Result;
 use log::{info, warn};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 use warp::http::StatusCode;
@@ -20,6 +21,7 @@ pub async fn start_web_server(
     port: u16,
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
+    shared_touch: Option<Arc<RwLock<Touch>>>,
 ) -> Result<()> {
     info!("Starting web server on port {}", port);
 
@@ -54,6 +56,17 @@ pub async fn start_web_server(
                     .and(warp::get())
                     .and(warp::any().map(move || Arc::clone(&status_for_get)))
                     .and_then(get_status_handler),
+            )
+            .or(
+                // Simulation endpoints
+                warp::path("simulation").and(
+                    // POST /api/simulation/trigger
+                    warp::path("trigger")
+                        .and(warp::post())
+                        .and(warp::body::json())
+                        .and(warp::any().map(move || shared_touch.clone()))
+                        .and_then(simulation_trigger_handler)
+                )
             ),
     );
 
@@ -85,6 +98,45 @@ fn serve_static_file(filename: &str) -> impl Reply {
             "content-type",
             "text/plain",
         )
+    }
+}
+
+async fn simulation_trigger_handler(
+    trigger_data: Value,
+    shared_touch: Option<Arc<RwLock<Touch>>>,
+) -> Result<impl Reply, Rejection> {
+    let corner_str = trigger_data["corner"]
+        .as_str()
+        .unwrap_or("UR");
+
+    if let Some(touch_arc) = shared_touch {
+        match TriggerCorner::from_string(corner_str) {
+            Ok(corner) => {
+                match touch_arc.read() {
+                    Ok(touch) => {
+                        touch.add_manual_trigger(corner);
+                        info!("Manual trigger added for corner: {:?}", corner);
+                        Ok(reply_json(&json!({
+                            "status": "success",
+                            "message": format!("Trigger added for corner: {:?}", corner)
+                        })))
+                    }
+                    Err(e) => {
+                        warn!("Failed to access touch component: {}", e);
+                        Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Invalid trigger corner: {}", e);
+                Err(warp::reject::custom(ConfigError::ValidationFailed(e.to_string())))
+            }
+        }
+    } else {
+        warn!("Simulation endpoints not available: no touch component");
+        Err(warp::reject::custom(ConfigError::ValidationFailed(
+            "Simulation endpoints are only available when touch component is enabled".to_string()
+        )))
     }
 }
 

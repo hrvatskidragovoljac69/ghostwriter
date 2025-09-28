@@ -32,6 +32,12 @@ pub struct Config {
     pub thinking_tokens: u32,
     pub log_level: String,
     pub trigger_corner: String,
+    // Simulation/test mode options
+    pub test_mode: bool,
+    pub test_touch_events_file: Option<String>,
+    pub test_screenshot_dir: Option<String>,
+    pub test_auto_trigger_delay: Option<u32>, // seconds
+    pub test_interaction_log: Option<String>,
 }
 
 impl Default for Config {
@@ -60,6 +66,12 @@ impl Default for Config {
             thinking_tokens: 5000,
             log_level: "info".to_string(),
             trigger_corner: "UR".to_string(),
+            // Simulation/test mode defaults
+            test_mode: false,
+            test_touch_events_file: None,
+            test_screenshot_dir: None,
+            test_auto_trigger_delay: None,
+            test_interaction_log: None,
         }
     }
 }
