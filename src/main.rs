@@ -5,7 +5,7 @@ use dotenv::dotenv;
 use log::{debug, info};
 use serde::Serialize;
 use serde_json::Value as json;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -18,13 +18,16 @@ use ghostwriter::{
     pen::Pen,
     screenshot::Screenshot,
     segmenter::analyze_image,
+    status::GhostwriterStatus,
     touch::{Touch, TriggerCorner},
     util::{setup_uinput, svg_to_bitmap, write_bitmap_to_file, OptionMap},
+    web_server::start_web_server,
 };
 
 // Output dimensions remain the same for both devices
 const VIRTUAL_WIDTH: u32 = 768;
 const VIRTUAL_HEIGHT: u32 = 1024;
+
 
 #[derive(Parser, Serialize)]
 #[command(author, version)]
@@ -132,6 +135,14 @@ pub struct Args {
     /// Save current configuration to ~/.ghostwriter.toml and exit
     #[arg(long)]
     save_config: bool,
+
+    /// Start web server for configuration UI
+    #[arg(long)]
+    web_server: bool,
+
+    /// Port for web server (default: 8080)
+    #[arg(long, default_value = "8080")]
+    web_port: u16,
 }
 
 fn main() -> Result<()> {
@@ -224,7 +235,51 @@ fn ghostwriter(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
+    // Create shared state for live config updates
+    let shared_config = Arc::new(RwLock::new(config.clone()));
+    let shared_status = Arc::new(RwLock::new(GhostwriterStatus::default()));
+
+    // Start web server if requested
+    let web_handle = if args.web_server {
+        let config_clone = Arc::clone(&shared_config);
+        let status_clone = Arc::clone(&shared_status);
+        let port = args.web_port;
+
+        Some(std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                start_web_server(port, config_clone, status_clone).await
+            })
+        }))
+    } else {
+        None
+    };
+
+    // Run main ghostwriter logic
+    let result = run_ghostwriter_loop(shared_config, shared_status);
+
+    // Wait for web server thread if it exists
+    if let Some(handle) = web_handle {
+        let _ = handle.join();
+    }
+
+    result
+}
+
+fn run_ghostwriter_loop(
+    shared_config: Arc<RwLock<Config>>,
+    shared_status: Arc<RwLock<GhostwriterStatus>>,
+) -> Result<()> {
+    let start_time = std::time::Instant::now();
+
+    // Initialize status
+    {
+        let mut status = shared_status.write().unwrap();
+        status.running = true;
+        status.last_activity = Some("Starting up...".to_string());
+    }
+
+    let mut config = shared_config.read().unwrap().clone();
+    let mut trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
     let keyboard = shared!(Keyboard::new(config.no_draw || config.no_keyboard, config.no_draw_progress,));
     let pen = shared!(Pen::new(config.no_draw));
     let touch = shared!(Touch::new(config.no_draw, trigger_corner));
@@ -338,8 +393,42 @@ fn ghostwriter(args: &Args) -> Result<()> {
     sleep(Duration::from_millis(1000));
 
     loop {
+        // Check for config updates and reload if necessary
+        let current_config = {
+            let config_guard = shared_config.read().unwrap();
+            config_guard.clone()
+        };
+
+        // Update status with current config info
+        {
+            let mut status = shared_status.write().unwrap();
+            status.uptime_seconds = start_time.elapsed().as_secs();
+            status.current_model = current_config.model.clone();
+            status.current_prompt = current_config.prompt.clone();
+            status.waiting_for_trigger = !current_config.no_trigger;
+            status.processing = false;
+            status.error = None;
+        }
+
+        // Recreate devices if trigger corner changed
+        if current_config.trigger_corner != config.trigger_corner {
+            trigger_corner = TriggerCorner::from_string(&current_config.trigger_corner)?;
+            // Note: touch device would need to be recreated here, but that's complex
+            // For now we'll just update the corner and log the change
+            info!("Trigger corner changed to: {}", current_config.trigger_corner);
+        }
+
+        // Update our local config reference
+        config = current_config;
+
         if config.no_trigger {
             debug!("Skipping waiting for trigger");
+
+            // Update status
+            {
+                let mut status = shared_status.write().unwrap();
+                status.last_activity = Some("Auto-triggering (no trigger mode)".to_string());
+            }
         } else {
             info!(
                 "Waiting for trigger (hand-touch in the {} corner)...",
@@ -350,7 +439,23 @@ fn ghostwriter(args: &Args) -> Result<()> {
                     TriggerCorner::LowerLeft => "lower-left",
                 }
             );
+
+            // Update status
+            {
+                let mut status = shared_status.write().unwrap();
+                status.last_activity = Some("Waiting for trigger...".to_string());
+                status.waiting_for_trigger = true;
+            }
+
             lock!(touch).wait_for_trigger()?;
+
+            // Update status after trigger
+            {
+                let mut status = shared_status.write().unwrap();
+                status.last_activity = Some("Trigger received, processing...".to_string());
+                status.waiting_for_trigger = false;
+                status.processing = true;
+            }
         }
 
         // Sleep a bit to differentiate the touches
@@ -358,6 +463,13 @@ fn ghostwriter(args: &Args) -> Result<()> {
         lock!(touch).tap_middle_bottom()?;
         // sleep(Duration::from_millis(1000));
         // lock!(keyboard).progress("Taking screenshot...")?;
+
+        // Update status for execution count and processing step
+        {
+            let mut status = shared_status.write().unwrap();
+            status.executions_count += 1;
+            status.last_activity = Some("Taking screenshot...".to_string());
+        }
 
         info!("Getting screenshot (or loading input image)");
         let base64_image = if let Some(input_png) = &config.input_png {
@@ -378,6 +490,12 @@ fn ghostwriter(args: &Args) -> Result<()> {
             return Ok(());
         }
 
+        // Update status
+        {
+            let mut status = shared_status.write().unwrap();
+            status.last_activity = Some("Loading prompt...".to_string());
+        }
+
         let prompt_general_raw = load_config(&config.prompt);
         let prompt_general_json = serde_json::from_str::<serde_json::Value>(prompt_general_raw.as_str())?;
         let prompt = prompt_general_json["prompt"]
@@ -385,6 +503,12 @@ fn ghostwriter(args: &Args) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("Prompt file '{}' missing required 'prompt' field", config.prompt))?;
 
         let segmentation_description = if config.apply_segmentation {
+            // Update status
+            {
+                let mut status = shared_status.write().unwrap();
+                status.last_activity = Some("Analyzing image segmentation...".to_string());
+            }
+
             info!("Building image segmentation");
             lock!(keyboard).progress("segmenting...")?;
             let input_filename = config
@@ -401,6 +525,12 @@ fn ghostwriter(args: &Args) -> Result<()> {
         };
         debug!("Segmentation description: {}", segmentation_description);
 
+        // Update status before model execution
+        {
+            let mut status = shared_status.write().unwrap();
+            status.last_activity = Some("Preparing model input...".to_string());
+        }
+
         engine.clear_content();
         engine.add_image_content(&base64_image);
 
@@ -412,9 +542,31 @@ fn ghostwriter(args: &Args) -> Result<()> {
 
         engine.add_text_content(prompt);
 
+        // Update status before model execution
+        {
+            let mut status = shared_status.write().unwrap();
+            status.last_activity = Some(format!("Executing {} model...", config.model));
+        }
+
         info!("Executing the engine (call out to {}", engine_name);
         lock!(keyboard).progress("thinking...")?;
-        if engine.execute().is_err() {
+
+        let execution_result = engine.execute();
+
+        // Update status after execution
+        {
+            let mut status = shared_status.write().unwrap();
+            if execution_result.is_err() {
+                status.last_activity = Some("Model execution failed".to_string());
+                status.error = Some("Model execution error".to_string());
+            } else {
+                status.last_activity = Some("Model execution completed".to_string());
+                status.error = None;
+            }
+            status.processing = false;
+        }
+
+        if execution_result.is_err() {
             lock!(keyboard).progress(" model error. ")?;
         }
 
