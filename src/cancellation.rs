@@ -85,10 +85,7 @@ macro_rules! check_cancellation {
 }
 
 /// Helper for running operations with cancellation support
-pub async fn with_cancellation<F, T>(
-    future: F,
-    cancellation: &GhostwriterCancellation,
-) -> anyhow::Result<T>
+pub async fn with_cancellation<F, T>(future: F, cancellation: &GhostwriterCancellation) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {

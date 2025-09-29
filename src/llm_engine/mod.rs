@@ -2,10 +2,10 @@ pub mod anthropic;
 pub mod google;
 pub mod openai;
 
+use crate::cancellation::GhostwriterCancellation;
 use anyhow::Result;
 use serde_json::Value as json;
 use std::collections::HashMap;
-use crate::cancellation::GhostwriterCancellation;
 
 #[async_trait::async_trait]
 pub trait LLMEngine {

@@ -3,13 +3,13 @@
 //! This module provides simulation capabilities that replace device interactions
 //! with file-based or API-driven simulation for development and testing.
 
-pub mod touch_simulator;
-pub mod screenshot_simulator;
 pub mod interaction_logger;
+pub mod screenshot_simulator;
+pub mod touch_simulator;
 
-pub use touch_simulator::TouchSimulator;
-pub use screenshot_simulator::ScreenshotSimulator;
 pub use interaction_logger::InteractionLogger;
+pub use screenshot_simulator::ScreenshotSimulator;
+pub use touch_simulator::TouchSimulator;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

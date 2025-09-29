@@ -1,6 +1,6 @@
 use super::{parse_duration, SimulationConfig, TouchEvent, TouchEventFile};
-use crate::touch::TriggerCorner;
 use crate::cancellation::GhostwriterCancellation;
+use crate::touch::TriggerCorner;
 use anyhow::Result;
 use log::{debug, info};
 use std::sync::{Arc, Mutex};

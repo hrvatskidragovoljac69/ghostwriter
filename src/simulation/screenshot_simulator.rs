@@ -66,7 +66,9 @@ impl ScreenshotSimulator {
     /// Get base64 encoded image data from current test image
     pub fn get_base64_image(&self) -> Result<String> {
         if self.image_files.is_empty() {
-            return Err(anyhow::anyhow!("No test images available. Use --test-screenshot-dir to specify a directory with PNG/JPG files."));
+            return Err(anyhow::anyhow!(
+                "No test images available. Use --test-screenshot-dir to specify a directory with PNG/JPG files."
+            ));
         }
 
         let index = {

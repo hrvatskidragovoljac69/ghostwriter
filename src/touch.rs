@@ -6,8 +6,8 @@ use log::{debug, info, trace};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
-use crate::device::DeviceModel;
 use crate::cancellation::GhostwriterCancellation;
+use crate::device::DeviceModel;
 use crate::simulation::{SimulationConfig, TouchSimulator};
 
 #[derive(Debug, Clone, Copy)]
@@ -49,13 +49,8 @@ const ABS_MT_TRACKING_ID: u16 = 57;
 const ABS_MT_PRESSURE: u16 = 58;
 
 pub enum TouchMode {
-    Real {
-        device: Option<Device>,
-        device_model: DeviceModel,
-    },
-    Simulated {
-        simulator: TouchSimulator,
-    },
+    Real { device: Option<Device>, device_model: DeviceModel },
+    Simulated { simulator: TouchSimulator },
 }
 
 pub struct Touch {
@@ -77,10 +72,7 @@ impl Touch {
         let device = if no_touch { None } else { Some(Device::open(device_path).unwrap()) };
 
         Self {
-            mode: TouchMode::Real {
-                device,
-                device_model,
-            },
+            mode: TouchMode::Real { device, device_model },
             trigger_corner,
         }
     }
@@ -97,9 +89,7 @@ impl Touch {
 
     pub async fn wait_for_trigger(&mut self, cancellation: &GhostwriterCancellation) -> Result<()> {
         match &mut self.mode {
-            TouchMode::Simulated { simulator } => {
-                simulator.wait_for_trigger(cancellation).await
-            }
+            TouchMode::Simulated { simulator } => simulator.wait_for_trigger(cancellation).await,
             TouchMode::Real { device, device_model } => {
                 let trigger_corner = self.trigger_corner;
                 Self::wait_for_real_trigger_static(device, device_model, trigger_corner, cancellation).await
@@ -107,7 +97,12 @@ impl Touch {
         }
     }
 
-    async fn wait_for_real_trigger_static(device: &mut Option<Device>, device_model: &DeviceModel, trigger_corner: TriggerCorner, cancellation: &GhostwriterCancellation) -> Result<()> {
+    async fn wait_for_real_trigger_static(
+        device: &mut Option<Device>,
+        device_model: &DeviceModel,
+        trigger_corner: TriggerCorner,
+        cancellation: &GhostwriterCancellation,
+    ) -> Result<()> {
         let mut position_x = 0;
         let mut position_y = 0;
 
@@ -128,7 +123,8 @@ impl Touch {
                     }
                 }
                 Ok::<Vec<InputEvent>, anyhow::Error>(events_to_process)
-            }).await;
+            })
+            .await;
 
             match events_result {
                 Ok(Ok(events_to_process)) => {

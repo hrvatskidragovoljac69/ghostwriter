@@ -17,8 +17,8 @@ pub struct InteractionLogger {
 /// Represents a logged interaction
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionLog {
-    pub timestamp: u64,        // Unix timestamp in milliseconds
-    pub interaction_type: String, // e.g. "touch_trigger", "draw_text", "draw_svg", "screenshot"
+    pub timestamp: u64,             // Unix timestamp in milliseconds
+    pub interaction_type: String,   // e.g. "touch_trigger", "draw_text", "draw_svg", "screenshot"
     pub details: serde_json::Value, // Flexible details specific to interaction type
     pub description: Option<String>,
 }
@@ -26,10 +26,7 @@ pub struct InteractionLog {
 impl InteractionLogger {
     pub fn new(config: SimulationConfig) -> Result<Self> {
         let log_file = if let Some(ref log_path) = config.interaction_log {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)?;
+            let file = OpenOptions::new().create(true).append(true).open(log_path)?;
             Some(Arc::new(Mutex::new(file)))
         } else {
             None
@@ -96,15 +93,16 @@ impl InteractionLogger {
             "new_value": new_value
         });
 
-        self.log_interaction("config_change", details, Some(&format!("Config {} changed from {} to {}", field, old_value, new_value)));
+        self.log_interaction(
+            "config_change",
+            details,
+            Some(&format!("Config {} changed from {} to {}", field, old_value, new_value)),
+        );
     }
 
     /// Log a generic interaction
     fn log_interaction(&self, interaction_type: &str, details: serde_json::Value, description: Option<&str>) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
 
         let log_entry = InteractionLog {
             timestamp,
@@ -141,11 +139,7 @@ impl InteractionLogger {
     /// Get recent interactions (last N)
     pub fn get_recent_interactions(&self, count: usize) -> Vec<InteractionLog> {
         let interactions = self.interactions.lock().unwrap();
-        let start_index = if interactions.len() > count {
-            interactions.len() - count
-        } else {
-            0
-        };
+        let start_index = if interactions.len() > count { interactions.len() - count } else { 0 };
         interactions[start_index..].to_vec()
     }
 

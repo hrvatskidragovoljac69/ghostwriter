@@ -1,6 +1,6 @@
 use super::LLMEngine;
+use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
-use crate::cancellation::{GhostwriterCancellation, with_cancellation};
 use anyhow::Result;
 use log::debug;
 use serde_json::json;
@@ -129,7 +129,7 @@ impl LLMEngine for Anthropic {
         let request_future = async {
             let client = reqwest::Client::new();
             let response = client
-                .post(&format!("{}/v1/messages", self.base_url))
+                .post(format!("{}/v1/messages", self.base_url))
                 .header("x-api-key", self.api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json")

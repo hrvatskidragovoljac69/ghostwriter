@@ -18,8 +18,8 @@ use ghostwriter::{
     llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine},
     pen::Pen,
     screenshot::Screenshot,
-    simulation::SimulationConfig,
     segmenter::analyze_image,
+    simulation::SimulationConfig,
     status::GhostwriterStatus,
     touch::{Touch, TriggerCorner},
     util::{setup_uinput, svg_to_bitmap, write_bitmap_to_file, OptionMap},
@@ -29,7 +29,6 @@ use ghostwriter::{
 // Output dimensions remain the same for both devices
 const VIRTUAL_WIDTH: u32 = 768;
 const VIRTUAL_HEIGHT: u32 = 1024;
-
 
 #[derive(Parser, Serialize)]
 #[command(author, version)]
@@ -284,9 +283,9 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         let port = args.web_port;
 
         Some(std::thread::spawn(move || {
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                start_web_server(port, config_clone, status_clone, touch_clone).await
-            })
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { start_web_server(port, config_clone, status_clone, touch_clone).await })
         }))
     } else {
         None

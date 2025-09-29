@@ -10,19 +10,14 @@ use base64::{engine::general_purpose, Engine as _};
 use image::ImageEncoder;
 
 use crate::device::DeviceModel;
-use crate::simulation::{SimulationConfig, ScreenshotSimulator};
+use crate::simulation::{ScreenshotSimulator, SimulationConfig};
 
 const VIRTUAL_WIDTH: u32 = 768;
 const VIRTUAL_HEIGHT: u32 = 1024;
 
 pub enum ScreenshotMode {
-    Real {
-        data: Vec<u8>,
-        device_model: DeviceModel,
-    },
-    Simulated {
-        simulator: ScreenshotSimulator,
-    },
+    Real { data: Vec<u8>, device_model: DeviceModel },
+    Simulated { simulator: ScreenshotSimulator },
 }
 
 pub struct Screenshot {
@@ -34,10 +29,7 @@ impl Screenshot {
         let device_model = DeviceModel::detect();
         info!("Screen detected device: {}", device_model.name());
         Ok(Screenshot {
-            mode: ScreenshotMode::Real {
-                data: vec![],
-                device_model,
-            }
+            mode: ScreenshotMode::Real { data: vec![], device_model },
         })
     }
 
@@ -45,7 +37,7 @@ impl Screenshot {
         let simulator = ScreenshotSimulator::new(simulation_config)?;
         info!("Screen using simulation mode");
         Ok(Screenshot {
-            mode: ScreenshotMode::Simulated { simulator }
+            mode: ScreenshotMode::Simulated { simulator },
         })
     }
 
@@ -355,9 +347,7 @@ impl Screenshot {
 
     pub fn base64(&self) -> Result<String> {
         match &self.mode {
-            ScreenshotMode::Simulated { simulator } => {
-                simulator.get_base64_image()
-            }
+            ScreenshotMode::Simulated { simulator } => simulator.get_base64_image(),
             ScreenshotMode::Real { data, .. } => {
                 let base64_image = general_purpose::STANDARD.encode(data);
                 Ok(base64_image)

@@ -65,8 +65,8 @@ pub async fn start_web_server(
                         .and(warp::post())
                         .and(warp::body::json())
                         .and(warp::any().map(move || shared_touch.clone()))
-                        .and_then(simulation_trigger_handler)
-                )
+                        .and_then(simulation_trigger_handler),
+                ),
             ),
     );
 
@@ -87,46 +87,31 @@ pub async fn start_web_server(
 
 fn serve_static_file(filename: &str) -> impl Reply {
     if let Some((_, content, content_type)) = WEB_FILES.iter().find(|(name, _, _)| *name == filename) {
-        warp::reply::with_header(
-            warp::reply::with_status(*content, StatusCode::OK),
-            "content-type",
-            *content_type,
-        )
+        warp::reply::with_header(warp::reply::with_status(*content, StatusCode::OK), "content-type", *content_type)
     } else {
-        warp::reply::with_header(
-            warp::reply::with_status("File not found", StatusCode::NOT_FOUND),
-            "content-type",
-            "text/plain",
-        )
+        warp::reply::with_header(warp::reply::with_status("File not found", StatusCode::NOT_FOUND), "content-type", "text/plain")
     }
 }
 
-async fn simulation_trigger_handler(
-    trigger_data: Value,
-    shared_touch: Option<Arc<RwLock<Touch>>>,
-) -> Result<impl Reply, Rejection> {
-    let corner_str = trigger_data["corner"]
-        .as_str()
-        .unwrap_or("UR");
+async fn simulation_trigger_handler(trigger_data: Value, shared_touch: Option<Arc<RwLock<Touch>>>) -> Result<impl Reply, Rejection> {
+    let corner_str = trigger_data["corner"].as_str().unwrap_or("UR");
 
     if let Some(touch_arc) = shared_touch {
         match TriggerCorner::from_string(corner_str) {
-            Ok(corner) => {
-                match touch_arc.read() {
-                    Ok(touch) => {
-                        touch.add_manual_trigger(corner);
-                        info!("Manual trigger added for corner: {:?}", corner);
-                        Ok(reply_json(&json!({
-                            "status": "success",
-                            "message": format!("Trigger added for corner: {:?}", corner)
-                        })))
-                    }
-                    Err(e) => {
-                        warn!("Failed to access touch component: {}", e);
-                        Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
-                    }
+            Ok(corner) => match touch_arc.read() {
+                Ok(touch) => {
+                    touch.add_manual_trigger(corner);
+                    info!("Manual trigger added for corner: {:?}", corner);
+                    Ok(reply_json(&json!({
+                        "status": "success",
+                        "message": format!("Trigger added for corner: {:?}", corner)
+                    })))
                 }
-            }
+                Err(e) => {
+                    warn!("Failed to access touch component: {}", e);
+                    Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
+                }
+            },
             Err(e) => {
                 warn!("Invalid trigger corner: {}", e);
                 Err(warp::reject::custom(ConfigError::ValidationFailed(e.to_string())))
@@ -135,7 +120,7 @@ async fn simulation_trigger_handler(
     } else {
         warn!("Simulation endpoints not available: no touch component");
         Err(warp::reject::custom(ConfigError::ValidationFailed(
-            "Simulation endpoints are only available when touch component is enabled".to_string()
+            "Simulation endpoints are only available when touch component is enabled".to_string(),
         )))
     }
 }
@@ -154,9 +139,7 @@ async fn save_config_handler(config: Config, shared_config: Arc<RwLock<Config>>)
     // Validate the config before saving
     if let Err(e) = config.validate() {
         warn!("Config validation failed: {}", e);
-        return Err(warp::reject::custom(ConfigError::ValidationFailed(
-            e.to_string(),
-        )));
+        return Err(warp::reject::custom(ConfigError::ValidationFailed(e.to_string())));
     }
 
     // Update shared config first (for immediate effect)
@@ -195,7 +178,6 @@ async fn get_status_handler(shared_status: Arc<RwLock<GhostwriterStatus>>) -> Re
         }
     }
 }
-
 
 #[derive(Debug)]
 enum ConfigError {
