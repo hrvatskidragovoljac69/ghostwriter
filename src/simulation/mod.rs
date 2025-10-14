@@ -14,11 +14,13 @@ pub use touch_simulator::TouchSimulator;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use crate::device::DeviceModel;
 
 /// Configuration for simulation mode
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
     pub enabled: bool,
+    pub device_model: DeviceModel,
     pub touch_events_file: Option<String>,
     pub screenshot_dir: Option<String>,
     pub auto_trigger_delay: Option<Duration>,
@@ -28,7 +30,8 @@ pub struct SimulationConfig {
 impl SimulationConfig {
     pub fn from_config(config: &crate::config::Config) -> Self {
         Self {
-            enabled: config.test_mode,
+            enabled: config.is_test_mode(),
+            device_model: config.get_test_device_model().unwrap_or(DeviceModel::Unknown),
             touch_events_file: config.test_touch_events_file.clone(),
             screenshot_dir: config.test_screenshot_dir.clone(),
             auto_trigger_delay: config.test_auto_trigger_delay.map(|s| Duration::from_secs(s as u64)),

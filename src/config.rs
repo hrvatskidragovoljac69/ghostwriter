@@ -1,3 +1,4 @@
+use crate::device::DeviceModel;
 use crate::touch::TriggerCorner;
 use anyhow::Result;
 use figment::{
@@ -33,7 +34,8 @@ pub struct Config {
     pub log_level: String,
     pub trigger_corner: String,
     // Simulation/test mode options
-    pub test_mode: bool,
+    pub test_mode: Option<String>,
+    pub test_device_model: Option<DeviceModel>,
     pub test_touch_events_file: Option<String>,
     pub test_screenshot_dir: Option<String>,
     pub test_auto_trigger_delay: Option<u32>, // seconds
@@ -67,7 +69,8 @@ impl Default for Config {
             log_level: "info".to_string(),
             trigger_corner: "UR".to_string(),
             // Simulation/test mode defaults
-            test_mode: false,
+            test_mode: None,
+            test_device_model: None,
             test_touch_events_file: None,
             test_screenshot_dir: None,
             test_auto_trigger_delay: None,
@@ -131,5 +134,15 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Check if test mode is enabled
+    pub fn is_test_mode(&self) -> bool {
+        self.test_mode.is_some()
+    }
+
+    /// Get the test device model, or None if not in test mode
+    pub fn get_test_device_model(&self) -> Option<DeviceModel> {
+        self.test_device_model
     }
 }

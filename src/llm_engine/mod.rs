@@ -7,6 +7,28 @@ use anyhow::Result;
 use serde_json::Value as json;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelExecutionStatus {
+    BuildingContext,
+    LlmProcessing,
+    ProcessingResponse,
+    CallingTools,
+    Done,
+    Error(String),
+}
+
+pub type StatusCallback = Box<dyn FnMut(ModelExecutionStatus) + Send>;
+
+macro_rules! status_update {
+    ($callback:expr, $status:expr) => {
+        if let Some(ref mut cb) = $callback {
+            cb($status);
+        }
+    };
+}
+
+pub(crate) use status_update;
+
 #[async_trait::async_trait]
 pub trait LLMEngine {
     fn new(options: &HashMap<String, String>) -> Self
@@ -16,5 +38,5 @@ pub trait LLMEngine {
     fn add_text_content(&mut self, text: &str);
     fn add_image_content(&mut self, base64_image: &str);
     fn clear_content(&mut self);
-    async fn execute(&mut self, cancellation: &GhostwriterCancellation) -> Result<()>;
+    async fn execute(&mut self, cancellation: &GhostwriterCancellation, status_callback: Option<StatusCallback>) -> Result<()>;
 }

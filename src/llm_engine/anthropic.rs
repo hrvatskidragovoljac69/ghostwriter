@@ -1,4 +1,4 @@
-use super::LLMEngine;
+use super::{LLMEngine, status_update};
 use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
@@ -89,7 +89,7 @@ impl LLMEngine for Anthropic {
         self.content.clear();
     }
 
-    async fn execute(&mut self, cancellation: &GhostwriterCancellation) -> Result<()> {
+    async fn execute(&mut self, cancellation: &GhostwriterCancellation, mut status_callback: Option<super::StatusCallback>) -> Result<()> {
         let mut tool_definitions = self.tools.iter().map(Self::anthropic_tool_definition).collect::<Vec<_>>();
 
         // Add web search tool if enabled
@@ -125,6 +125,12 @@ impl LLMEngine for Anthropic {
 
         debug!("Request: {}", body);
 
+        // Notify that we're building context
+        status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
+
+        // Notify that we're processing with LLM
+        status_update!(status_callback, super::ModelExecutionStatus::LlmProcessing);
+
         // Create async HTTP request with cancellation support
         let request_future = async {
             let client = reqwest::Client::new();
@@ -148,6 +154,10 @@ impl LLMEngine for Anthropic {
 
         let json: json = with_cancellation(request_future, cancellation).await?;
         debug!("Response: {}", json);
+
+        // Notify that we're processing the response
+        status_update!(status_callback, super::ModelExecutionStatus::ProcessingResponse);
+
         let content_array = &json["content"];
 
         // Loop through all content entries
@@ -156,6 +166,8 @@ impl LLMEngine for Anthropic {
 
             match content_type {
                 "tool_use" => {
+                    // Notify that we're calling tools
+                    status_update!(status_callback, super::ModelExecutionStatus::CallingTools);
                     let function_name = content_item["name"].as_str().unwrap();
                     let function_input = &content_item["input"];
                     let tool = self.tools.iter_mut().find(|tool| tool.name == function_name);
@@ -163,11 +175,15 @@ impl LLMEngine for Anthropic {
                     if let Some(tool) = tool {
                         if let Some(callback) = &mut tool.callback {
                             callback(function_input.clone());
+                            // Notify that we're done
+                            status_update!(status_callback, super::ModelExecutionStatus::Done);
                             return Ok(());
                         } else {
+                            status_update!(status_callback, super::ModelExecutionStatus::Error("No callback registered for tool".to_string()));
                             return Err(anyhow::anyhow!("No callback registered for tool {}", function_name));
                         }
                     } else {
+                        status_update!(status_callback, super::ModelExecutionStatus::Error("No tool registered".to_string()));
                         return Err(anyhow::anyhow!("No tool registered with name {}", function_name));
                     }
                 }
@@ -187,6 +203,7 @@ impl LLMEngine for Anthropic {
             }
         }
 
+        status_update!(status_callback, super::ModelExecutionStatus::Error("No tool calls found in response".to_string()));
         Err(anyhow::anyhow!("No tool calls found in response"))
     }
 }

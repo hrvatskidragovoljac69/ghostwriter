@@ -76,7 +76,7 @@ impl LLMEngine for Google {
         self.content.clear();
     }
 
-    async fn execute(&mut self, _cancellation: &crate::cancellation::GhostwriterCancellation) -> Result<()> {
+    async fn execute(&mut self, _cancellation: &crate::cancellation::GhostwriterCancellation, _status_callback: Option<super::StatusCallback>) -> Result<()> {
         let body = json!({
             "contents": [{
                 "role": "user",

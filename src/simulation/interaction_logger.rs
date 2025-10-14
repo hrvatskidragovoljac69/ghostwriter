@@ -9,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Logger for simulated interactions, useful for testing and verification
 pub struct InteractionLogger {
-    config: SimulationConfig,
     log_file: Option<Arc<Mutex<std::fs::File>>>,
     interactions: Arc<Mutex<Vec<InteractionLog>>>,
 }
@@ -39,7 +38,6 @@ impl InteractionLogger {
         }
 
         Ok(Self {
-            config,
             log_file,
             interactions: Arc::new(Mutex::new(Vec::new())),
         })

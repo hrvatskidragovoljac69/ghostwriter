@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 /// Screenshot simulator that cycles through test images
 /// instead of taking real device screenshots
 pub struct ScreenshotSimulator {
-    config: SimulationConfig,
     image_files: Vec<PathBuf>,
     current_index: Arc<Mutex<usize>>,
 }
@@ -28,7 +27,6 @@ impl ScreenshotSimulator {
         }
 
         Ok(Self {
-            config,
             image_files,
             current_index: Arc::new(Mutex::new(0)),
         })

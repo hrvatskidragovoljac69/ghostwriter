@@ -4,7 +4,7 @@ use evdev::{Device, InputEvent};
 use log::{debug, info, trace};
 
 use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
 use crate::cancellation::GhostwriterCancellation;
 use crate::device::DeviceModel;
@@ -69,7 +69,13 @@ impl Touch {
             DeviceModel::Unknown => "/dev/input/event2", // Default to RM2
         };
 
-        let device = if no_touch { None } else { Some(Device::open(device_path).unwrap()) };
+        let device = if no_touch {
+            None
+        } else {
+            let mut dev = Device::open(device_path).unwrap();
+            dev.set_nonblocking(true).unwrap(); // Set to non-blocking mode
+            Some(dev)
+        };
 
         Self {
             mode: TouchMode::Real { device, device_model },
@@ -109,55 +115,47 @@ impl Touch {
         loop {
             // Check for cancellation before each iteration
             if cancellation.should_cancel() {
+                debug!("Touch waiting cancelled due to config change");
                 return Err(anyhow::anyhow!("Touch waiting cancelled"));
             }
 
-            // Process events in a short timeout window to allow cancellation checking
-            let events_result = timeout(Duration::from_millis(100), async {
-                let mut events_to_process = Vec::new();
-                if let Some(device) = device {
-                    // Note: fetch_events() is still blocking, but we timeout quickly
-                    // In a full async implementation, we'd use async evdev or epoll
-                    for event in device.fetch_events()? {
-                        events_to_process.push(event);
+            // Try to get events without blocking - fetch_events() returns WouldBlock if no events
+            let events_to_process = if let Some(device) = device {
+                match device.fetch_events() {
+                    Ok(events) => events.collect::<Vec<_>>(),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No events available, this is expected in non-blocking mode
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        debug!("Error reading touch events: {}", e);
+                        Vec::new()
                     }
                 }
-                Ok::<Vec<InputEvent>, anyhow::Error>(events_to_process)
-            })
-            .await;
+            } else {
+                Vec::new()
+            };
 
-            match events_result {
-                Ok(Ok(events_to_process)) => {
-                    // Process the events after getting them
-                    for event in events_to_process {
-                        if event.code() == ABS_MT_POSITION_X {
-                            position_x = event.value();
-                        }
-                        if event.code() == ABS_MT_POSITION_Y {
-                            position_y = event.value();
-                        }
-                        if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
-                            let (x, y) = Self::input_to_virtual_static((position_x, position_y), device_model);
-                            debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
-                            if Self::is_in_trigger_zone_static(x, y, trigger_corner) {
-                                debug!("Touch release in target zone!");
-                                return Ok(());
-                            }
-                        }
+            // Process any events we got
+            for event in events_to_process {
+                if event.code() == ABS_MT_POSITION_X {
+                    position_x = event.value();
+                }
+                if event.code() == ABS_MT_POSITION_Y {
+                    position_y = event.value();
+                }
+                if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
+                    let (x, y) = Self::input_to_virtual_static((position_x, position_y), device_model);
+                    debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
+                    if Self::is_in_trigger_zone_static(x, y, trigger_corner) {
+                        debug!("Touch release in target zone!");
+                        return Ok(());
                     }
-                }
-                Ok(Err(e)) => {
-                    // Error reading events, continue loop
-                    debug!("Error reading touch events: {}", e);
-                }
-                Err(_) => {
-                    // Timeout - this is expected, allows us to check cancellation
-                    // No events within timeout window, continue checking
                 }
             }
 
-            // Small yield to prevent busy waiting
-            sleep(Duration::from_millis(10)).await;
+            // Short sleep to prevent busy waiting, but still allow quick cancellation response
+            sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -241,9 +239,6 @@ impl Touch {
         Ok(())
     }
 
-    fn is_in_trigger_zone(&self, x: i32, y: i32) -> bool {
-        Self::is_in_trigger_zone_static(x, y, self.trigger_corner)
-    }
 
     fn is_in_trigger_zone_static(x: i32, y: i32, trigger_corner: TriggerCorner) -> bool {
         const CORNER_SIZE: i32 = 68; // Size of the trigger zone (68x68 pixels)
@@ -256,37 +251,8 @@ impl Touch {
         }
     }
 
-    fn screen_width(&self) -> u32 {
-        let device_model = match &self.mode {
-            TouchMode::Real { device_model, .. } => device_model,
-            TouchMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
-        };
-        match device_model {
-            DeviceModel::Remarkable2 => 1404,
-            DeviceModel::RemarkablePaperPro => 2065,
-            DeviceModel::Unknown => 1404, // Default to RM2
-        }
-    }
 
-    fn screen_height(&self) -> u32 {
-        let device_model = match &self.mode {
-            TouchMode::Real { device_model, .. } => device_model,
-            TouchMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
-        };
-        match device_model {
-            DeviceModel::Remarkable2 => 1872,
-            DeviceModel::RemarkablePaperPro => 2833,
-            DeviceModel::Unknown => 1872, // Default to RM2
-        }
-    }
 
-    fn virtual_to_input(&self, (x, y): (i32, i32)) -> (i32, i32) {
-        let device_model = match &self.mode {
-            TouchMode::Real { device_model, .. } => device_model,
-            TouchMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
-        };
-        Self::virtual_to_input_static((x, y), device_model)
-    }
 
     fn virtual_to_input_static((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
         // Swap and normalize the coordinates
@@ -309,13 +275,6 @@ impl Touch {
         }
     }
 
-    fn input_to_virtual(&self, (x, y): (i32, i32)) -> (i32, i32) {
-        let device_model = match &self.mode {
-            TouchMode::Real { device_model, .. } => device_model,
-            TouchMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
-        };
-        Self::input_to_virtual_static((x, y), device_model)
-    }
 
     fn input_to_virtual_static((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
         // Swap and normalize the coordinates

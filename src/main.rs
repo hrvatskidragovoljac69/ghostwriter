@@ -6,6 +6,7 @@ use log::{debug, info};
 use serde::Serialize;
 use serde_json::Value as json;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,9 +14,10 @@ use tokio::time::sleep;
 use ghostwriter::{
     cancellation::GhostwriterCancellation,
     config::Config,
+    device::DeviceModel,
     embedded_assets::load_config,
     keyboard::Keyboard,
-    llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine},
+    llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine, ModelExecutionStatus, StatusCallback},
     pen::Pen,
     screenshot::Screenshot,
     segmenter::analyze_image,
@@ -145,9 +147,9 @@ pub struct Args {
     #[arg(long, default_value = "8080")]
     web_port: u16,
 
-    /// Enable test/simulation mode for off-device testing
+    /// Enable test/simulation mode for specific device (rm2, rmpp)
     #[arg(long)]
-    test_mode: bool,
+    test_mode: Option<String>,
 
     /// File containing scripted touch events for simulation (JSON format)
     #[arg(long)]
@@ -248,7 +250,14 @@ fn create_engine(engine_name: &str, engine_options: &OptionMap) -> Result<Box<dy
 }
 
 async fn ghostwriter(args: &Args) -> Result<()> {
-    let config = Config::load(args)?;
+    let mut config = Config::load(args)?;
+
+    // Parse test_mode device model if provided
+    if let Some(device_str) = &config.test_mode {
+        let device_model = DeviceModel::from_string(device_str)?;
+        config.test_device_model = Some(device_model);
+        info!("Test mode enabled for device: {}", device_model.name());
+    }
 
     // Handle --save-config option
     if args.save_config {
@@ -263,8 +272,8 @@ async fn ghostwriter(args: &Args) -> Result<()> {
 
     // Create Touch component for web API and main loop
     let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
-    let shared_touch = if args.web_server || config.test_mode {
-        let touch = if config.test_mode {
+    let shared_touch = if args.web_server || config.is_test_mode() {
+        let touch = if config.is_test_mode() {
             let simulation_config = SimulationConfig::from_config(&config);
             Touch::new_simulated(simulation_config, trigger_corner)?
         } else {
@@ -319,13 +328,13 @@ async fn run_ghostwriter_loop(
 
     let mut config = shared_config.read().unwrap().clone();
     let mut trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
-    let keyboard = shared!(Keyboard::new(config.test_mode || config.no_draw || config.no_keyboard, config.no_draw_progress,));
-    let pen = shared!(Pen::new(config.test_mode || config.no_draw));
+    let keyboard = shared!(Keyboard::new(config.is_test_mode() || config.no_draw || config.no_keyboard, config.no_draw_progress,));
+    let pen = shared!(Pen::new(config.is_test_mode() || config.no_draw));
 
     let touch = if let Some(shared_touch) = shared_touch {
         shared_touch
     } else {
-        if config.test_mode {
+        if config.is_test_mode() {
             let simulation_config = SimulationConfig::from_config(&config);
             Arc::new(RwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
         } else {
@@ -470,7 +479,7 @@ async fn run_ghostwriter_loop(
             // Cancel current execution to immediately apply the change
             cancellation.cancel_execution();
             // Recreate touch device with new trigger corner
-            let new_touch = Touch::new(current_config.no_draw, trigger_corner);
+            let new_touch = Touch::new(current_config.is_test_mode() || current_config.no_draw || current_config.no_keyboard, trigger_corner);
             *touch.write().unwrap() = new_touch;
         }
 
@@ -503,7 +512,19 @@ async fn run_ghostwriter_loop(
                 status.waiting_for_trigger = true;
             }
 
-            touch.write().unwrap().wait_for_trigger(&cancellation).await?;
+            match touch.write().unwrap().wait_for_trigger(&cancellation).await {
+                Ok(()) => {
+                    // Trigger received normally
+                }
+                Err(e) => {
+                    if e.to_string().contains("cancelled") {
+                        info!("Touch waiting cancelled (likely due to config change)");
+                        continue; // Go to next loop iteration to check new config
+                    } else {
+                        return Err(e); // Propagate other errors
+                    }
+                }
+            }
 
             // Update status after trigger
             {
@@ -531,7 +552,7 @@ async fn run_ghostwriter_loop(
         let base64_image = if let Some(input_png) = &config.input_png {
             BASE64_STANDARD.encode(std::fs::read(input_png)?)
         } else {
-            let mut screenshot = if config.test_mode {
+            let mut screenshot = if config.is_test_mode() {
                 let simulation_config = SimulationConfig::from_config(&config);
                 Screenshot::new_simulated(simulation_config)?
             } else {
@@ -544,6 +565,7 @@ async fn run_ghostwriter_loop(
             }
             screenshot.base64()?
         };
+        info!(" ... Done getting screenshot (or loading input image)");
 
         if config.no_submit {
             info!("Image not submitted to model due to --no-submit flag");
@@ -612,7 +634,35 @@ async fn run_ghostwriter_loop(
         info!("Executing the engine (call out to {}", engine_name);
         lock!(keyboard).progress("thinking...")?;
 
-        let execution_result = engine.execute(&cancellation).await;
+        // Start progressive dots timer
+        let keyboard_for_timer = Arc::clone(&keyboard);
+        let timer_cancellation = Arc::new(AtomicBool::new(false));
+        let timer_cancellation_clone = Arc::clone(&timer_cancellation);
+
+        let timer_task = tokio::spawn(async move {
+            while !timer_cancellation_clone.load(Ordering::Relaxed) {
+                sleep(Duration::from_millis(500)).await;
+                if !timer_cancellation_clone.load(Ordering::Relaxed) {
+                    if let Err(e) = lock!(keyboard_for_timer).progress(".") {
+                        log::debug!("Failed to update thinking progress: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Create status callback that stops the timer
+        let timer_stop = Arc::clone(&timer_cancellation);
+        let status_callback = Some(Box::new(move |status: ModelExecutionStatus| {
+            if status == ModelExecutionStatus::ProcessingResponse {
+                timer_stop.store(true, Ordering::Relaxed);
+            }
+        }) as StatusCallback);
+
+        let execution_result = engine.execute(&cancellation, status_callback).await;
+
+        // Stop the timer and wait for task to complete
+        timer_cancellation.store(true, Ordering::Relaxed);
+        let _ = timer_task.await;
 
         // Update status after execution
         {

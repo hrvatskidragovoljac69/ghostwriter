@@ -80,7 +80,7 @@ impl LLMEngine for OpenAI {
         self.content.clear();
     }
 
-    async fn execute(&mut self, _cancellation: &crate::cancellation::GhostwriterCancellation) -> Result<()> {
+    async fn execute(&mut self, _cancellation: &crate::cancellation::GhostwriterCancellation, _status_callback: Option<super::StatusCallback>) -> Result<()> {
         let body = json!({
             "model": self.model,
             "messages": [{
