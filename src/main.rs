@@ -291,7 +291,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     let web_handle = if args.web_server {
         let config_clone = Arc::clone(&shared_config);
         let status_clone = Arc::clone(&shared_status);
-        let touch_clone = shared_touch.as_ref().map(|t| Arc::clone(t));
+        let touch_clone = shared_touch.as_ref().map(Arc::clone);
         let cancellation_clone = Some(Arc::clone(&cancellation));
         let port = args.web_port;
 
@@ -357,13 +357,11 @@ async fn run_ghostwriter_loop(
 
     let touch = if let Some(shared_touch) = shared_touch {
         shared_touch
+    } else if config.is_test_mode() {
+        let simulation_config = SimulationConfig::from_config(&config);
+        Arc::new(RwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
     } else {
-        if config.is_test_mode() {
-            let simulation_config = SimulationConfig::from_config(&config);
-            Arc::new(RwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
-        } else {
-            Arc::new(RwLock::new(Touch::new(config.no_draw, trigger_corner)))
-        }
+        Arc::new(RwLock::new(Touch::new(config.no_draw, trigger_corner)))
     };
 
     // Give time for the virtual keyboard to be plugged in
