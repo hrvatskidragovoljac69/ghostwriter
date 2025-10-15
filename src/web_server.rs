@@ -22,6 +22,7 @@ pub async fn start_web_server(
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
     shared_touch: Option<Arc<RwLock<Touch>>>,
+    cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
 ) -> Result<()> {
     info!("Starting web server on port {}", port);
 
@@ -35,6 +36,7 @@ pub async fn start_web_server(
     let config_for_get = Arc::clone(&shared_config);
     let config_for_post = Arc::clone(&shared_config);
     let status_for_get = Arc::clone(&shared_status);
+    let cancellation_for_config = cancellation.clone();
 
     let api_routes = warp::path("api").and(
         // GET /api/config
@@ -48,6 +50,7 @@ pub async fn start_web_server(
                     .and(warp::post())
                     .and(warp::body::json())
                     .and(warp::any().map(move || Arc::clone(&config_for_post)))
+                    .and(warp::any().map(move || cancellation_for_config.clone()))
                     .and_then(save_config_handler),
             )
             .or(
@@ -135,7 +138,11 @@ async fn get_config_handler(shared_config: Arc<RwLock<Config>>) -> Result<impl R
     }
 }
 
-async fn save_config_handler(config: Config, shared_config: Arc<RwLock<Config>>) -> Result<impl Reply, Rejection> {
+async fn save_config_handler(
+    config: Config,
+    shared_config: Arc<RwLock<Config>>,
+    cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
+) -> Result<impl Reply, Rejection> {
     // Validate the config before saving
     if let Err(e) = config.validate() {
         warn!("Config validation failed: {}", e);
@@ -151,6 +158,12 @@ async fn save_config_handler(config: Config, shared_config: Arc<RwLock<Config>>)
             warn!("Failed to update shared config: {}", e);
             return Err(warp::reject::custom(ConfigError::SaveFailed(e.to_string())));
         }
+    }
+
+    // Trigger cancellation to interrupt current execution and apply config changes
+    if let Some(cancellation) = &cancellation {
+        info!("Triggering cancellation due to config change from web interface");
+        cancellation.cancel_execution();
     }
 
     // Also save to file

@@ -1,4 +1,4 @@
-use super::{LLMEngine, status_update};
+use super::{status_update, LLMEngine};
 use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
@@ -179,7 +179,10 @@ impl LLMEngine for Anthropic {
                             status_update!(status_callback, super::ModelExecutionStatus::Done);
                             return Ok(());
                         } else {
-                            status_update!(status_callback, super::ModelExecutionStatus::Error("No callback registered for tool".to_string()));
+                            status_update!(
+                                status_callback,
+                                super::ModelExecutionStatus::Error("No callback registered for tool".to_string())
+                            );
                             return Err(anyhow::anyhow!("No callback registered for tool {}", function_name));
                         }
                     } else {
@@ -203,7 +206,10 @@ impl LLMEngine for Anthropic {
             }
         }
 
-        status_update!(status_callback, super::ModelExecutionStatus::Error("No tool calls found in response".to_string()));
+        status_update!(
+            status_callback,
+            super::ModelExecutionStatus::Error("No tool calls found in response".to_string())
+        );
         Err(anyhow::anyhow!("No tool calls found in response"))
     }
 }

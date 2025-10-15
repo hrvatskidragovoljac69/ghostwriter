@@ -11,10 +11,10 @@ pub use interaction_logger::InteractionLogger;
 pub use screenshot_simulator::ScreenshotSimulator;
 pub use touch_simulator::TouchSimulator;
 
+use crate::device::DeviceModel;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use crate::device::DeviceModel;
 
 /// Configuration for simulation mode
 #[derive(Debug, Clone)]

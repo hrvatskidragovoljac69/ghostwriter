@@ -7,7 +7,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Config {
     // Direct mapping to CLI args - no arbitrary grouping
     pub engine: Option<String>,
@@ -123,10 +123,10 @@ impl Config {
         TriggerCorner::from_string(&self.trigger_corner)?;
 
         // Validate log level
-        match self.log_level.as_str() {
-            "error" | "warn" | "info" | "debug" | "trace" => {}
-            _ => return Err(anyhow::anyhow!("Invalid log level: {}", self.log_level)),
-        }
+        // match self.log_level.as_str() {
+        //     "error" | "warn" | "info" | "debug" | "trace" => {}
+        //     _ => return Err(anyhow::anyhow!("Invalid log level: {}", self.log_level)),
+        // }
 
         // Validate thinking tokens
         if self.thinking_tokens == 0 {

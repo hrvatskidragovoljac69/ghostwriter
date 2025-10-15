@@ -5,8 +5,8 @@ use dotenv::dotenv;
 use log::{debug, info};
 use serde::Serialize;
 use serde_json::Value as json;
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use std::time::Duration;
 use tokio::time::sleep;
@@ -284,24 +284,45 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         None
     };
 
+    // Create cancellation object to be shared between main loop and web server
+    let cancellation = Arc::new(GhostwriterCancellation::new());
+
     // Start web server if requested
     let web_handle = if args.web_server {
         let config_clone = Arc::clone(&shared_config);
         let status_clone = Arc::clone(&shared_status);
         let touch_clone = shared_touch.as_ref().map(|t| Arc::clone(t));
+        let cancellation_clone = Some(Arc::clone(&cancellation));
         let port = args.web_port;
 
         Some(std::thread::spawn(move || {
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(async { start_web_server(port, config_clone, status_clone, touch_clone).await })
+                .block_on(async { start_web_server(port, config_clone, status_clone, touch_clone, cancellation_clone).await })
         }))
     } else {
         None
     };
 
-    // Run main ghostwriter logic
-    let result = run_ghostwriter_loop(shared_config, shared_status, shared_touch).await;
+    // Run main ghostwriter logic, restarting on config changes
+    let result = loop {
+        match run_ghostwriter_loop(
+            Arc::clone(&shared_config),
+            Arc::clone(&shared_status),
+            shared_touch.as_ref().map(Arc::clone),
+            Arc::clone(&cancellation),
+        )
+        .await
+        {
+            Ok(()) => {
+                info!("Ghostwriter loop exited normally, restarting to pick up config changes...");
+                continue; // Restart the loop
+            }
+            Err(e) => {
+                break Err(e); // Exit on actual errors
+            }
+        }
+    };
 
     // Wait for web server thread if it exists
     if let Some(handle) = web_handle {
@@ -315,9 +336,9 @@ async fn run_ghostwriter_loop(
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
     shared_touch: Option<Arc<RwLock<Touch>>>,
+    cancellation: Arc<GhostwriterCancellation>,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
-    let mut cancellation = GhostwriterCancellation::new();
 
     // Initialize status
     {
@@ -327,8 +348,11 @@ async fn run_ghostwriter_loop(
     }
 
     let mut config = shared_config.read().unwrap().clone();
-    let mut trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
-    let keyboard = shared!(Keyboard::new(config.is_test_mode() || config.no_draw || config.no_keyboard, config.no_draw_progress,));
+    let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
+    let keyboard = shared!(Keyboard::new(
+        config.is_test_mode() || config.no_draw || config.no_keyboard,
+        config.no_draw_progress,
+    ));
     let pen = shared!(Pen::new(config.is_test_mode() || config.no_draw));
 
     let touch = if let Some(shared_touch) = shared_touch {
@@ -451,6 +475,8 @@ async fn run_ghostwriter_loop(
     sleep(Duration::from_millis(1000)).await;
 
     loop {
+        info!("Starting new execution loop");
+
         // Start a new execution cycle
         cancellation.new_execution_cycle();
 
@@ -471,16 +497,11 @@ async fn run_ghostwriter_loop(
             status.error = None;
         }
 
-        // Check if config changed and recreate touch device if needed
-        let config_changed = current_config.trigger_corner != config.trigger_corner;
+        // Check if any config changed that requires restarting the loop
+        let config_changed = current_config != config;
         if config_changed {
-            trigger_corner = TriggerCorner::from_string(&current_config.trigger_corner)?;
-            info!("Trigger corner changed to: {}, recreating touch device", current_config.trigger_corner);
-            // Cancel current execution to immediately apply the change
-            cancellation.cancel_execution();
-            // Recreate touch device with new trigger corner
-            let new_touch = Touch::new(current_config.is_test_mode() || current_config.no_draw || current_config.no_keyboard, trigger_corner);
-            *touch.write().unwrap() = new_touch;
+            info!("Configuration change detected, restarting ghostwriter loop to pick up all changes");
+            return Ok(()); // Exit the current loop so it can be restarted with new config
         }
 
         // Update our local config reference

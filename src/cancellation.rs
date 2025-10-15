@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -8,8 +8,8 @@ pub struct GhostwriterCancellation {
     /// Main cancellation token for the entire operation
     pub main_token: CancellationToken,
 
-    /// Token specifically for the current execution cycle
-    pub execution_token: CancellationToken,
+    /// Token specifically for the current execution cycle (wrapped in Mutex for interior mutability)
+    pub execution_token: Arc<Mutex<CancellationToken>>,
 
     /// Watch channel for config change notifications
     pub config_changed: Arc<watch::Sender<bool>>,
@@ -19,7 +19,7 @@ pub struct GhostwriterCancellation {
 impl GhostwriterCancellation {
     pub fn new() -> Self {
         let main_token = CancellationToken::new();
-        let execution_token = CancellationToken::new();
+        let execution_token = Arc::new(Mutex::new(CancellationToken::new()));
 
         let (config_changed, config_changed_rx) = watch::channel(false);
 
@@ -33,18 +33,24 @@ impl GhostwriterCancellation {
 
     /// Cancel the current execution cycle (for config changes)
     pub fn cancel_execution(&self) {
-        self.execution_token.cancel();
+        if let Ok(token) = self.execution_token.lock() {
+            token.cancel();
+        }
     }
 
     /// Cancel everything (for shutdown)
     pub fn cancel_all(&self) {
         self.main_token.cancel();
-        self.execution_token.cancel();
+        if let Ok(token) = self.execution_token.lock() {
+            token.cancel();
+        }
     }
 
     /// Create a new execution token for the next cycle
-    pub fn new_execution_cycle(&mut self) {
-        self.execution_token = CancellationToken::new();
+    pub fn new_execution_cycle(&self) {
+        if let Ok(mut token) = self.execution_token.lock() {
+            *token = CancellationToken::new();
+        }
     }
 
     /// Signal that config has changed
@@ -54,12 +60,16 @@ impl GhostwriterCancellation {
 
     /// Check if we should cancel current operation
     pub fn should_cancel(&self) -> bool {
-        self.main_token.is_cancelled() || self.execution_token.is_cancelled()
+        let execution_cancelled = self.execution_token.lock().map(|token| token.is_cancelled()).unwrap_or(false);
+        self.main_token.is_cancelled() || execution_cancelled
     }
 
     /// Get a cancellation token for the current execution
     pub fn execution_token(&self) -> CancellationToken {
-        self.execution_token.clone()
+        self.execution_token
+            .lock()
+            .map(|token| token.clone())
+            .unwrap_or_else(|_| CancellationToken::new())
     }
 
     /// Get the main cancellation token
