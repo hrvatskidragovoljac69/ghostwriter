@@ -6,6 +6,7 @@ use log::{info, warn};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 use warp::http::StatusCode;
 use warp::reply::{json as reply_json, with_status};
 use warp::{Filter, Rejection, Reply};
@@ -21,7 +22,7 @@ pub async fn start_web_server(
     port: u16,
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
-    shared_touch: Option<Arc<RwLock<Touch>>>,
+    shared_touch: Option<Arc<TokioRwLock<Touch>>>,
     cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
 ) -> Result<()> {
     info!("Starting web server on port {}", port);
@@ -96,33 +97,28 @@ fn serve_static_file(filename: &str) -> impl Reply {
     }
 }
 
-async fn simulation_trigger_handler(trigger_data: Value, shared_touch: Option<Arc<RwLock<Touch>>>) -> Result<impl Reply, Rejection> {
+async fn simulation_trigger_handler(trigger_data: Value, shared_touch: Option<Arc<TokioRwLock<Touch>>>) -> Result<impl Reply, Rejection> {
     let corner_str = trigger_data["corner"].as_str().unwrap_or("UR");
 
     if let Some(touch_arc) = shared_touch {
         match TriggerCorner::from_string(corner_str) {
-            Ok(corner) => match touch_arc.read() {
-                Ok(touch) => {
-                    touch.add_manual_trigger(corner);
-                    info!("Manual trigger added for corner: {:?}", corner);
-                    Ok(reply_json(&json!({
-                        "status": "success",
-                        "message": format!("Trigger added for corner: {:?}", corner)
-                    })))
-                }
-                Err(e) => {
-                    warn!("Failed to access touch component: {}", e);
-                    Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
-                }
-            },
+            Ok(corner) => {
+                let touch = touch_arc.read().await;
+                touch.add_manual_trigger(corner);
+                info!("Manual trigger added for corner: {:?}", corner);
+                Ok(reply_json(&json!({
+                    "status": "success",
+                    "message": format!("Trigger added for corner: {:?}", corner)
+                })))
+            }
             Err(e) => {
                 warn!("Invalid trigger corner: {}", e);
-                Err(warp::reject::custom(ConfigError::ValidationFailed(e.to_string())))
+                Err(warp::reject::custom(ConfigError::Validation(e.to_string())))
             }
         }
     } else {
         warn!("Simulation endpoints not available: no touch component");
-        Err(warp::reject::custom(ConfigError::ValidationFailed(
+        Err(warp::reject::custom(ConfigError::Validation(
             "Simulation endpoints are only available when touch component is enabled".to_string(),
         )))
     }
@@ -133,7 +129,7 @@ async fn get_config_handler(shared_config: Arc<RwLock<Config>>) -> Result<impl R
         Ok(config) => Ok(reply_json(&*config)),
         Err(e) => {
             warn!("Failed to read shared config: {}", e);
-            Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
+            Err(warp::reject::custom(ConfigError::Load(e.to_string())))
         }
     }
 }
@@ -146,7 +142,7 @@ async fn save_config_handler(
     // Validate the config before saving
     if let Err(e) = config.validate() {
         warn!("Config validation failed: {}", e);
-        return Err(warp::reject::custom(ConfigError::ValidationFailed(e.to_string())));
+        return Err(warp::reject::custom(ConfigError::Validation(e.to_string())));
     }
 
     // Update shared config first (for immediate effect)
@@ -156,7 +152,7 @@ async fn save_config_handler(
         }
         Err(e) => {
             warn!("Failed to update shared config: {}", e);
-            return Err(warp::reject::custom(ConfigError::SaveFailed(e.to_string())));
+            return Err(warp::reject::custom(ConfigError::Save(e.to_string())));
         }
     }
 
@@ -177,7 +173,7 @@ async fn save_config_handler(
         }
         Err(e) => {
             warn!("Failed to save config to file: {}", e);
-            Err(warp::reject::custom(ConfigError::SaveFailed(e.to_string())))
+            Err(warp::reject::custom(ConfigError::Save(e.to_string())))
         }
     }
 }
@@ -187,16 +183,16 @@ async fn get_status_handler(shared_status: Arc<RwLock<GhostwriterStatus>>) -> Re
         Ok(status) => Ok(reply_json(&*status)),
         Err(e) => {
             warn!("Failed to read shared status: {}", e);
-            Err(warp::reject::custom(ConfigError::LoadFailed(e.to_string())))
+            Err(warp::reject::custom(ConfigError::Load(e.to_string())))
         }
     }
 }
 
 #[derive(Debug)]
 enum ConfigError {
-    LoadFailed(String),
-    SaveFailed(String),
-    ValidationFailed(String),
+    Load(String),
+    Save(String),
+    Validation(String),
 }
 
 impl warp::reject::Reject for ConfigError {}
@@ -206,9 +202,9 @@ async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> {
         (StatusCode::NOT_FOUND, "Not Found".to_string())
     } else if let Some(config_err) = err.find::<ConfigError>() {
         match config_err {
-            ConfigError::LoadFailed(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load config: {}", msg)),
-            ConfigError::SaveFailed(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save config: {}", msg)),
-            ConfigError::ValidationFailed(msg) => (StatusCode::BAD_REQUEST, format!("Config validation failed: {}", msg)),
+            ConfigError::Load(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load config: {}", msg)),
+            ConfigError::Save(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save config: {}", msg)),
+            ConfigError::Validation(msg) => (StatusCode::BAD_REQUEST, format!("Config validation failed: {}", msg)),
         }
     } else if err.find::<warp::filters::body::BodyDeserializeError>().is_some() {
         (StatusCode::BAD_REQUEST, "Invalid JSON".to_string())

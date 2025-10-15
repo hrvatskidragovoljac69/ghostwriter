@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value as json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
 use std::time::Duration;
 use tokio::time::sleep;
@@ -279,7 +280,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         } else {
             Touch::new(config.no_draw, trigger_corner)
         };
-        Some(Arc::new(RwLock::new(touch)))
+        Some(Arc::new(TokioRwLock::new(touch)))
     } else {
         None
     };
@@ -335,7 +336,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
 async fn run_ghostwriter_loop(
     shared_config: Arc<RwLock<Config>>,
     shared_status: Arc<RwLock<GhostwriterStatus>>,
-    shared_touch: Option<Arc<RwLock<Touch>>>,
+    shared_touch: Option<Arc<TokioRwLock<Touch>>>,
     cancellation: Arc<GhostwriterCancellation>,
 ) -> Result<()> {
     let start_time = std::time::Instant::now();
@@ -359,15 +360,15 @@ async fn run_ghostwriter_loop(
         shared_touch
     } else if config.is_test_mode() {
         let simulation_config = SimulationConfig::from_config(&config);
-        Arc::new(RwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
+        Arc::new(TokioRwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
     } else {
-        Arc::new(RwLock::new(Touch::new(config.no_draw, trigger_corner)))
+        Arc::new(TokioRwLock::new(Touch::new(config.no_draw, trigger_corner)))
     };
 
     // Give time for the virtual keyboard to be plugged in
     sleep(Duration::from_millis(1000)).await;
 
-    touch.write().unwrap().tap_middle_bottom().await?;
+    touch.write().await.tap_middle_bottom().await?;
     sleep(Duration::from_millis(1000)).await;
 
     lock!(keyboard).progress("Keyboard loaded...")?;
@@ -531,7 +532,7 @@ async fn run_ghostwriter_loop(
                 status.waiting_for_trigger = true;
             }
 
-            match touch.write().unwrap().wait_for_trigger(&cancellation).await {
+            match touch.write().await.wait_for_trigger(&cancellation).await {
                 Ok(()) => {
                     // Trigger received normally
                 }
@@ -556,7 +557,7 @@ async fn run_ghostwriter_loop(
 
         // Sleep a bit to differentiate the touches
         sleep(Duration::from_millis(100)).await;
-        touch.write().unwrap().tap_middle_bottom().await?;
+        touch.write().await.tap_middle_bottom().await?;
         // sleep(Duration::from_millis(1000));
         // lock!(keyboard).progress("Taking screenshot...")?;
 

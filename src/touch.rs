@@ -50,8 +50,8 @@ const ABS_MT_PRESSURE: u16 = 58;
 
 pub enum TouchMode {
     Real {
-        input_device: Option<Device>, // For sending touch events
-        read_device: Option<Device>,  // For reading touch events
+        input_device: Box<Option<Device>>, // For sending touch events
+        read_device: Box<Option<Device>>,  // For reading touch events
         device_model: DeviceModel,
     },
     Simulated {
@@ -76,11 +76,11 @@ impl Touch {
         };
 
         let (input_device, read_device) = if no_touch {
-            (None, None)
+            (Box::new(None), Box::new(None))
         } else {
             let input_dev = Device::open(device_path).unwrap();
             let read_dev = Device::open(device_path).unwrap();
-            (Some(input_dev), Some(read_dev))
+            (Box::new(Some(input_dev)), Box::new(Some(read_dev)))
         };
 
         Self {
@@ -114,7 +114,7 @@ impl Touch {
     }
 
     async fn wait_for_real_trigger_static(
-        device: &mut Option<Device>,
+        device: &mut Box<Option<Device>>,
         device_model: &DeviceModel,
         trigger_corner: TriggerCorner,
         cancellation: &GhostwriterCancellation,
@@ -122,7 +122,7 @@ impl Touch {
         let mut position_x = 0;
         let mut position_y = 0;
 
-        if let Some(device) = device.take() {
+        if let Some(device) = device.as_mut().take() {
             let mut events = device.into_event_stream()?;
 
             loop {
@@ -186,7 +186,7 @@ impl Touch {
                 input_device, device_model, ..
             } => {
                 let (x, y) = Self::virtual_to_input_static(xy, device_model);
-                if let Some(device) = input_device {
+                if let Some(device) = input_device.as_mut() {
                     trace!("touch_start at ({}, {})", x, y);
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
@@ -213,7 +213,7 @@ impl Touch {
                 Ok(())
             }
             TouchMode::Real { input_device, .. } => {
-                if let Some(device) = input_device {
+                if let Some(device) = input_device.as_mut() {
                     trace!("touch_stop");
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
@@ -237,7 +237,7 @@ impl Touch {
                 input_device, device_model, ..
             } => {
                 let (x, y) = Self::virtual_to_input_static(xy, device_model);
-                if let Some(device) = input_device {
+                if let Some(device) = input_device.as_mut() {
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, 1),
