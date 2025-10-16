@@ -1,16 +1,10 @@
-use super::{status_update, LLMEngine};
+use super::{status_update, LLMEngine, Tool};
 use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
 use log::debug;
 use serde_json::json;
 use serde_json::Value as json;
-
-pub struct Tool {
-    name: String,
-    definition: json,
-    callback: Option<Box<dyn FnMut(json) + Send>>,
-}
 
 pub struct Google {
     model: String,
@@ -21,16 +15,16 @@ pub struct Google {
 }
 
 impl Google {
-    fn google_tool_definition(tool: &Tool) -> json {
+    pub fn add_content(&mut self, content: json) {
+        self.content.push(content);
+    }
+
+    fn tool_definition_json(tool: &Tool) -> json {
         json!({
             "name": tool.definition["name"],
             "description": tool.definition["description"],
             "parameters": tool.definition["parameters"],
         })
-    }
-
-    pub fn add_content(&mut self, content: json) {
-        self.content.push(content);
     }
 }
 
@@ -83,7 +77,7 @@ impl LLMEngine for Google {
                 "role": "user",
                 "parts": self.content
             }],
-            "tools": [{ "function_declarations": self.tools.iter().map(Self::google_tool_definition).collect::<Vec<_>>() }],
+            "tools": [{ "function_declarations": self.tools.iter().map(Self::tool_definition_json).collect::<Vec<_>>() }],
             "tool_config": {
                 "function_calling_config": {
                     "mode": "ANY"

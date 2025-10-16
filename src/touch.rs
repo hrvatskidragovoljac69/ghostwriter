@@ -50,8 +50,8 @@ const ABS_MT_PRESSURE: u16 = 58;
 
 pub enum TouchMode {
     Real {
-        input_device: Box<Option<Device>>, // For sending touch events
-        event_stream: Box<Option<EventStream>>,  // For reading touch events
+        input_device: Option<Device>, // For sending touch events
+        event_stream: Option<EventStream>,  // For reading touch events
         device_model: DeviceModel,
     },
     Simulated {
@@ -76,12 +76,12 @@ impl Touch {
         };
 
         let (input_device, event_stream) = if no_touch {
-            (Box::new(None), Box::new(None))
+            (None, None)
         } else {
             let input_dev = Device::open(device_path).unwrap();
             let read_dev = Device::open(device_path).unwrap();
             let stream = read_dev.into_event_stream().unwrap();
-            (Box::new(Some(input_dev)), Box::new(Some(stream)))
+            (Some(input_dev), Some(stream))
         };
 
         Self {
@@ -114,26 +114,26 @@ impl Touch {
             TouchMode::Real { event_stream, device_model, .. } => {
                 debug!("wait_for_trigger: using Real device mode");
                 let trigger_corner = self.trigger_corner;
-                Self::wait_for_real_trigger_static(event_stream, device_model, trigger_corner, cancellation).await
+                Self::wait_for_real_trigger(event_stream, device_model, trigger_corner, cancellation).await
             }
         }
     }
 
-    async fn wait_for_real_trigger_static(
-        event_stream: &mut Box<Option<EventStream>>,
+    async fn wait_for_real_trigger(
+        event_stream: &mut Option<EventStream>,
         device_model: &DeviceModel,
         trigger_corner: TriggerCorner,
         cancellation: &GhostwriterCancellation,
     ) -> Result<()> {
-        debug!("wait_for_real_trigger_static: entered");
+        debug!("wait_for_real_trigger: entered");
         let mut position_x = 0;
         let mut position_y = 0;
 
-        if let Some(events) = event_stream.as_mut() {
-            debug!("wait_for_real_trigger_static: event stream available, entering wait loop");
+        if let Some(events) = event_stream {
+            debug!("wait_for_real_trigger: event stream available, entering wait loop");
 
             loop {
-                debug!("wait_for_real_trigger_static: loop iteration starting");
+                debug!("wait_for_real_trigger: loop iteration starting");
                 tokio::select! {
                     // Check for cancellation (only main token, not execution cycles)
                     _ = async {
@@ -141,14 +141,14 @@ impl Touch {
                             sleep(Duration::from_millis(50)).await;
                         }
                     } => {
-                        debug!("wait_for_real_trigger_static: cancellation detected");
+                        debug!("wait_for_real_trigger: cancellation detected");
                         debug!("Touch waiting cancelled due to shutdown");
                         return Err(anyhow::anyhow!("Touch waiting cancelled"));
                     }
 
                     // Wait for next event
                     event_result = events.next_event() => {
-                        debug!("wait_for_real_trigger_static: received event");
+                        debug!("wait_for_real_trigger: received event");
                         match event_result {
                             Ok(event) => {
                                 if event.code() == ABS_MT_POSITION_X {
@@ -158,11 +158,11 @@ impl Touch {
                                     position_y = event.value();
                                 }
                                 if event.code() == ABS_MT_TRACKING_ID && event.value() == -1 {
-                                    let (x, y) = Self::input_to_virtual_static((position_x, position_y), device_model);
+                                    let (x, y) = Self::input_to_virtual((position_x, position_y), device_model);
                                     debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
-                                    if Self::is_in_trigger_zone_static(x, y, trigger_corner) {
+                                    if Self::is_in_trigger_zone(x, y, trigger_corner) {
                                         debug!("Touch release in target zone!");
-                                        debug!("wait_for_real_trigger_static: returning Ok()");
+                                        debug!("wait_for_real_trigger: returning Ok()");
                                         return Ok(());
                                     } else {
                                         debug!("Touch release NOT in trigger zone, continuing");
@@ -178,11 +178,11 @@ impl Touch {
                 }
             }
         } else {
-            debug!("wait_for_real_trigger_static: no event stream available, entering cancellation wait loop");
+            debug!("wait_for_real_trigger: no event stream available, entering cancellation wait loop");
             // No event stream available, just wait for cancellation
             loop {
                 if cancellation.should_cancel_main() {
-                    debug!("wait_for_real_trigger_static: cancellation detected in no-stream path");
+                    debug!("wait_for_real_trigger: cancellation detected in no-stream path");
                     debug!("Touch waiting cancelled due to shutdown");
                     return Err(anyhow::anyhow!("Touch waiting cancelled"));
                 }
@@ -200,8 +200,8 @@ impl Touch {
             TouchMode::Real {
                 input_device, device_model, ..
             } => {
-                let (x, y) = Self::virtual_to_input_static(xy, device_model);
-                if let Some(device) = input_device.as_mut() {
+                let (x, y) = Self::virtual_to_input(xy, device_model);
+                if let Some(device) = input_device {
                     trace!("touch_start at ({}, {})", x, y);
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
@@ -228,7 +228,7 @@ impl Touch {
                 Ok(())
             }
             TouchMode::Real { input_device, .. } => {
-                if let Some(device) = input_device.as_mut() {
+                if let Some(device) = input_device {
                     trace!("touch_stop");
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
@@ -251,8 +251,8 @@ impl Touch {
             TouchMode::Real {
                 input_device, device_model, ..
             } => {
-                let (x, y) = Self::virtual_to_input_static(xy, device_model);
-                if let Some(device) = input_device.as_mut() {
+                let (x, y) = Self::virtual_to_input(xy, device_model);
+                if let Some(device) = input_device {
                     device.send_events(&[
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_SLOT, 0),
                         InputEvent::new(EvdevEventType::ABSOLUTE.0, ABS_MT_TRACKING_ID, 1),
@@ -275,7 +275,7 @@ impl Touch {
         Ok(())
     }
 
-    fn is_in_trigger_zone_static(x: i32, y: i32, trigger_corner: TriggerCorner) -> bool {
+    fn is_in_trigger_zone(x: i32, y: i32, trigger_corner: TriggerCorner) -> bool {
         const CORNER_SIZE: i32 = 68; // Size of the trigger zone (68x68 pixels)
 
         match trigger_corner {
@@ -286,7 +286,7 @@ impl Touch {
         }
     }
 
-    fn virtual_to_input_static((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
+    fn virtual_to_input((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
         // Swap and normalize the coordinates
         let x_normalized = x as f32 / VIRTUAL_WIDTH as f32;
         let y_normalized = y as f32 / VIRTUAL_HEIGHT as f32;
@@ -307,7 +307,7 @@ impl Touch {
         }
     }
 
-    fn input_to_virtual_static((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
+    fn input_to_virtual((x, y): (i32, i32), device_model: &DeviceModel) -> (i32, i32) {
         // Swap and normalize the coordinates
         let (screen_width, screen_height) = Self::screen_dimensions(device_model);
         let x_normalized = x as f32 / screen_width as f32;

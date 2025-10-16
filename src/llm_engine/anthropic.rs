@@ -1,16 +1,10 @@
-use super::{status_update, LLMEngine};
+use super::{status_update, LLMEngine, Tool};
 use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
 use log::debug;
 use serde_json::json;
 use serde_json::Value as json;
-
-pub struct Tool {
-    name: String,
-    definition: json,
-    callback: Option<Box<dyn FnMut(json) + Send>>,
-}
 
 pub struct Anthropic {
     model: String,
@@ -28,7 +22,7 @@ impl Anthropic {
         self.content.push(content);
     }
 
-    fn anthropic_tool_definition(tool: &Tool) -> json {
+    fn tool_definition_json(tool: &Tool) -> json {
         json!({
             "name": tool.definition["name"],
             "description": tool.definition["description"],
@@ -94,7 +88,7 @@ impl LLMEngine for Anthropic {
         // Notify that we're building context
         // status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
 
-        let mut tool_definitions = self.tools.iter().map(Self::anthropic_tool_definition).collect::<Vec<_>>();
+        let mut tool_definitions = self.tools.iter().map(Self::tool_definition_json).collect::<Vec<_>>();
 
         // Add web search tool if enabled
         if self.web_search {

@@ -1,16 +1,10 @@
-use super::{status_update, LLMEngine};
+use super::{status_update, LLMEngine, Tool};
 use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
 use log::debug;
 use serde_json::json;
 use serde_json::Value as json;
-
-pub struct Tool {
-    name: String,
-    definition: json,
-    callback: Option<Box<dyn FnMut(json) + Send>>,
-}
 
 pub struct OpenAI {
     model: String,
@@ -21,19 +15,19 @@ pub struct OpenAI {
 }
 
 impl OpenAI {
-    fn openai_tool_definition(tool: &Tool) -> json {
-        json!({
-                "type": "function",
-                "function": {
-            "name": tool.definition["name"],
-            "description": tool.definition["description"],
-            "parameters": tool.definition["parameters"],
-                }
-        })
-    }
-
     pub fn add_content(&mut self, content: json) {
         self.content.push(content);
+    }
+
+    fn tool_definition_json(tool: &Tool) -> json {
+        json!({
+            "type": "function",
+            "function": {
+                "name": tool.definition["name"],
+                "description": tool.definition["description"],
+                "parameters": tool.definition["parameters"],
+            }
+        })
     }
 }
 
@@ -88,7 +82,7 @@ impl LLMEngine for OpenAI {
                 "role": "user",
                 "content": self.content
             }],
-            "tools": self.tools.iter().map(Self::openai_tool_definition).collect::<Vec<_>>(),
+            "tools": self.tools.iter().map(Self::tool_definition_json).collect::<Vec<_>>(),
             "tool_choice": "required",
             "parallel_tool_calls": false
         });

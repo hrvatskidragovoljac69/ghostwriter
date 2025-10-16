@@ -25,6 +25,7 @@ pub enum TriggerEvent {
 }
 
 /// Progress states during AI processing
+/// Uses ModelExecutionStatus for LLM operations, plus additional states for the full workflow
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProgressState {
     /// No processing happening
@@ -33,18 +34,10 @@ pub enum ProgressState {
     WaitingForTrigger,
     /// Taking screenshot
     TakingScreenshot,
-    /// Building context (segmentation, prompt prep)
-    BuildingContext,
-    /// LLM is processing (thinking)
-    Thinking,
-    /// Processing LLM response
-    ProcessingResponse,
-    /// Executing tools (drawing)
-    ExecutingTools,
+    /// LLM execution state
+    LlmState(ModelExecutionStatus),
     /// Processing completed successfully
     Done,
-    /// Error occurred
-    Error(String),
 }
 
 /// Message from coordinator to processing task
@@ -232,29 +225,32 @@ pub async fn progress_task(
                         ProgressState::TakingScreenshot => {
                             info!("Progress: Taking screenshot...");
                         }
-                        ProgressState::BuildingContext => {
+                        ProgressState::LlmState(ModelExecutionStatus::BuildingContext) => {
                             info!("Progress: Building context...");
                             if let Ok(mut kb) = keyboard.lock() {
                                 let _ = kb.progress("Thinking");
                             }
                         }
-                        ProgressState::Thinking => {
+                        ProgressState::LlmState(ModelExecutionStatus::LlmProcessing) => {
                             info!("Progress: Thinking...");
                         }
-                        ProgressState::ProcessingResponse => {
+                        ProgressState::LlmState(ModelExecutionStatus::ProcessingResponse) => {
                             info!("Progress: Processing response...");
                         }
-                        ProgressState::ExecutingTools => {
+                        ProgressState::LlmState(ModelExecutionStatus::CallingTools) => {
                             info!("Progress: Executing tools...");
                             if let Ok(mut kb) = keyboard.lock() {
                                 let _ = kb.progress_end();
                             }
                         }
+                        ProgressState::LlmState(ModelExecutionStatus::Done) => {
+                            debug!("Progress: LLM Done");
+                        }
+                        ProgressState::LlmState(ModelExecutionStatus::Error(msg)) => {
+                            debug!("Progress: Error - {}", msg);
+                        }
                         ProgressState::Done => {
                             debug!("Progress: Done");
-                        }
-                        ProgressState::Error(msg) => {
-                            debug!("Progress: Error - {}", msg);
                         }
                     }
                 }
@@ -262,7 +258,7 @@ pub async fn progress_task(
 
             // Add dots for thinking state
             _ = sleep(Duration::from_millis(500)) => {
-                if current_state == ProgressState::Thinking {
+                if matches!(current_state, ProgressState::LlmState(ModelExecutionStatus::LlmProcessing)) {
                     if let Ok(mut kb) = keyboard.lock() {
                         let _ = kb.progress(".");
                     }
@@ -284,7 +280,7 @@ pub async fn processing_task(
     info!("Processing task: starting");
 
     // Update progress: taking screenshot
-    info!("Setting ProcessState::TakingScreenshot");
+    info!("Setting ProgressState::TakingScreenshot");
     let _ = progress_tx.send(ProgressState::TakingScreenshot);
     tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
 
@@ -314,7 +310,7 @@ pub async fn processing_task(
     }
 
     // Update progress: building context
-    let _ = progress_tx.send(ProgressState::BuildingContext);
+    let _ = progress_tx.send(ProgressState::LlmState(ModelExecutionStatus::BuildingContext));
     tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
 
     // Apply segmentation if requested
@@ -362,18 +358,10 @@ pub async fn processing_task(
     engine_guard.add_image_content(&base64_image);
     engine_guard.add_text_content(&prompt);
 
-    // Create status callback that maps model execution status to progress state
+    // Create status callback that wraps model execution status in LlmState
     let progress_tx_clone = progress_tx.clone();
     let status_callback = Some(Box::new(move |status: ModelExecutionStatus| {
-        let progress_state = match status {
-            ModelExecutionStatus::BuildingContext => ProgressState::BuildingContext,
-            ModelExecutionStatus::LlmProcessing => ProgressState::Thinking,
-            ModelExecutionStatus::ProcessingResponse => ProgressState::ProcessingResponse,
-            ModelExecutionStatus::CallingTools => ProgressState::ExecutingTools,
-            ModelExecutionStatus::Done => ProgressState::Done,
-            ModelExecutionStatus::Error(msg) => ProgressState::Error(msg),
-        };
-        let _ = progress_tx_clone.send(progress_state);
+        let _ = progress_tx_clone.send(ProgressState::LlmState(status));
     }) as Box<dyn FnMut(ModelExecutionStatus) + Send>);
 
     // Execute LLM with proper error handling
@@ -400,7 +388,7 @@ pub async fn processing_task(
 
             // Only send error state if not already cancelled
             if !error_msg.contains("cancelled") && !error_msg.contains("canceled") {
-                let _ = progress_tx.send(ProgressState::Error(error_msg.clone()));
+                let _ = progress_tx.send(ProgressState::LlmState(ModelExecutionStatus::Error(error_msg.clone())));
                 // Keep error visible for a moment
                 sleep(Duration::from_secs(2)).await;
             }
