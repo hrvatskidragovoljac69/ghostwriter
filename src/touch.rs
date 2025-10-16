@@ -1,6 +1,6 @@
 use anyhow::Result;
 use evdev::EventType as EvdevEventType;
-use evdev::{Device, InputEvent};
+use evdev::{Device, EventStream, InputEvent};
 use log::{debug, info, trace};
 
 use std::time::Duration;
@@ -51,7 +51,7 @@ const ABS_MT_PRESSURE: u16 = 58;
 pub enum TouchMode {
     Real {
         input_device: Box<Option<Device>>, // For sending touch events
-        read_device: Box<Option<Device>>,  // For reading touch events
+        event_stream: Box<Option<EventStream>>,  // For reading touch events
         device_model: DeviceModel,
     },
     Simulated {
@@ -75,18 +75,19 @@ impl Touch {
             DeviceModel::Unknown => "/dev/input/event2", // Default to RM2
         };
 
-        let (input_device, read_device) = if no_touch {
+        let (input_device, event_stream) = if no_touch {
             (Box::new(None), Box::new(None))
         } else {
             let input_dev = Device::open(device_path).unwrap();
             let read_dev = Device::open(device_path).unwrap();
-            (Box::new(Some(input_dev)), Box::new(Some(read_dev)))
+            let stream = read_dev.into_event_stream().unwrap();
+            (Box::new(Some(input_dev)), Box::new(Some(stream)))
         };
 
         Self {
             mode: TouchMode::Real {
                 input_device,
-                read_device,
+                event_stream,
                 device_model,
             },
             trigger_corner,
@@ -104,41 +105,50 @@ impl Touch {
     }
 
     pub async fn wait_for_trigger(&mut self, cancellation: &GhostwriterCancellation) -> Result<()> {
+        debug!("wait_for_trigger: entered, checking mode");
         match &mut self.mode {
-            TouchMode::Simulated { simulator } => simulator.wait_for_trigger(cancellation).await,
-            TouchMode::Real { read_device, device_model, .. } => {
+            TouchMode::Simulated { simulator } => {
+                debug!("wait_for_trigger: using Simulated mode");
+                simulator.wait_for_trigger(cancellation).await
+            }
+            TouchMode::Real { event_stream, device_model, .. } => {
+                debug!("wait_for_trigger: using Real device mode");
                 let trigger_corner = self.trigger_corner;
-                Self::wait_for_real_trigger_static(read_device, device_model, trigger_corner, cancellation).await
+                Self::wait_for_real_trigger_static(event_stream, device_model, trigger_corner, cancellation).await
             }
         }
     }
 
     async fn wait_for_real_trigger_static(
-        device: &mut Box<Option<Device>>,
+        event_stream: &mut Box<Option<EventStream>>,
         device_model: &DeviceModel,
         trigger_corner: TriggerCorner,
         cancellation: &GhostwriterCancellation,
     ) -> Result<()> {
+        debug!("wait_for_real_trigger_static: entered");
         let mut position_x = 0;
         let mut position_y = 0;
 
-        if let Some(device) = device.as_mut().take() {
-            let mut events = device.into_event_stream()?;
+        if let Some(events) = event_stream.as_mut() {
+            debug!("wait_for_real_trigger_static: event stream available, entering wait loop");
 
             loop {
+                debug!("wait_for_real_trigger_static: loop iteration starting");
                 tokio::select! {
-                    // Check for cancellation
+                    // Check for cancellation (only main token, not execution cycles)
                     _ = async {
-                        while !cancellation.should_cancel() {
+                        while !cancellation.should_cancel_main() {
                             sleep(Duration::from_millis(50)).await;
                         }
                     } => {
-                        debug!("Touch waiting cancelled due to config change");
+                        debug!("wait_for_real_trigger_static: cancellation detected");
+                        debug!("Touch waiting cancelled due to shutdown");
                         return Err(anyhow::anyhow!("Touch waiting cancelled"));
                     }
 
                     // Wait for next event
                     event_result = events.next_event() => {
+                        debug!("wait_for_real_trigger_static: received event");
                         match event_result {
                             Ok(event) => {
                                 if event.code() == ABS_MT_POSITION_X {
@@ -152,7 +162,10 @@ impl Touch {
                                     debug!("Touch release detected at ({}, {}) normalized ({}, {})", position_x, position_y, x, y);
                                     if Self::is_in_trigger_zone_static(x, y, trigger_corner) {
                                         debug!("Touch release in target zone!");
+                                        debug!("wait_for_real_trigger_static: returning Ok()");
                                         return Ok(());
+                                    } else {
+                                        debug!("Touch release NOT in trigger zone, continuing");
                                     }
                                 }
                             }
@@ -165,10 +178,12 @@ impl Touch {
                 }
             }
         } else {
-            // No device available, just wait for cancellation
+            debug!("wait_for_real_trigger_static: no event stream available, entering cancellation wait loop");
+            // No event stream available, just wait for cancellation
             loop {
-                if cancellation.should_cancel() {
-                    debug!("Touch waiting cancelled due to config change");
+                if cancellation.should_cancel_main() {
+                    debug!("wait_for_real_trigger_static: cancellation detected in no-stream path");
+                    debug!("Touch waiting cancelled due to shutdown");
                     return Err(anyhow::anyhow!("Touch waiting cancelled"));
                 }
                 sleep(Duration::from_millis(50)).await;

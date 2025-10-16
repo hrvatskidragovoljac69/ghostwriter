@@ -64,6 +64,11 @@ impl GhostwriterCancellation {
         self.main_token.is_cancelled() || execution_cancelled
     }
 
+    /// Check if the main cancellation token has been triggered (for long-lived tasks)
+    pub fn should_cancel_main(&self) -> bool {
+        self.main_token.is_cancelled()
+    }
+
     /// Get a cancellation token for the current execution
     pub fn execution_token(&self) -> CancellationToken {
         self.execution_token

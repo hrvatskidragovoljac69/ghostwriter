@@ -67,8 +67,8 @@ impl TouchSimulator {
         info!("TouchSimulator waiting for trigger (corner: {:?})", self.trigger_corner);
 
         loop {
-            // Check for cancellation
-            if cancellation.should_cancel() {
+            // Check for cancellation (only main token, not execution cycles)
+            if cancellation.should_cancel_main() {
                 return Err(anyhow::anyhow!("Touch waiting cancelled"));
             }
 

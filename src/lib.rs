@@ -1,5 +1,6 @@
 pub mod cancellation;
 pub mod config;
+pub mod coordinator;
 pub mod device;
 pub mod embedded_assets;
 pub mod keyboard;

@@ -1,13 +1,10 @@
 use anyhow::Result;
-use base64::prelude::*;
 use clap::Parser;
 use dotenv::dotenv;
-use log::{debug, info};
+use log::info;
 use serde::Serialize;
-use serde_json::Value as json;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::RwLock as TokioRwLock;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use std::time::Duration;
 use tokio::time::sleep;
@@ -15,13 +12,12 @@ use tokio::time::sleep;
 use ghostwriter::{
     cancellation::GhostwriterCancellation,
     config::Config,
+    coordinator::{self, CoordinatorChannels, ProgressState},
     device::DeviceModel,
     embedded_assets::load_config,
     keyboard::Keyboard,
-    llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine, ModelExecutionStatus, StatusCallback},
+    llm_engine::{anthropic::Anthropic, google::Google, openai::OpenAI, LLMEngine},
     pen::Pen,
-    screenshot::Screenshot,
-    segmenter::analyze_image,
     simulation::SimulationConfig,
     status::GhostwriterStatus,
     touch::{Touch, TriggerCorner},
@@ -268,8 +264,8 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     }
 
     // Create shared state for live config updates
-    let shared_config = Arc::new(RwLock::new(config.clone()));
-    let shared_status = Arc::new(RwLock::new(GhostwriterStatus::default()));
+    let shared_config = Arc::new(TokioRwLock::new(config.clone()));
+    let shared_status = Arc::new(TokioRwLock::new(GhostwriterStatus::default()));
 
     // Create Touch component for web API and main loop
     let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
@@ -288,18 +284,21 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     // Create cancellation object to be shared between main loop and web server
     let cancellation = Arc::new(GhostwriterCancellation::new());
 
-    // Start web server if requested
+    // Create config watch channel for communication between web server and main loop
+    let (config_watch_tx, config_watch_rx) = tokio::sync::watch::channel(config.clone());
+    let shared_config_watch_tx = Arc::new(config_watch_tx);
+
+    // Spawn web server in same tokio runtime if requested
     let web_handle = if args.web_server {
         let config_clone = Arc::clone(&shared_config);
         let status_clone = Arc::clone(&shared_status);
         let touch_clone = shared_touch.as_ref().map(Arc::clone);
-        let cancellation_clone = Some(Arc::clone(&cancellation));
+        let cancellation_clone = Arc::clone(&cancellation);
+        let config_watch_tx_clone = Arc::clone(&shared_config_watch_tx);
         let port = args.web_port;
 
-        Some(std::thread::spawn(move || {
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(async { start_web_server(port, config_clone, status_clone, touch_clone, cancellation_clone).await })
+        Some(tokio::spawn(async move {
+            start_web_server(port, config_clone, status_clone, touch_clone, Some(cancellation_clone), Some(config_watch_tx_clone)).await
         }))
     } else {
         None
@@ -307,11 +306,13 @@ async fn ghostwriter(args: &Args) -> Result<()> {
 
     // Run main ghostwriter logic, restarting on config changes
     let result = loop {
+        let mut config_watch_rx_clone = config_watch_rx.clone();
         match run_ghostwriter_loop(
             Arc::clone(&shared_config),
             Arc::clone(&shared_status),
             shared_touch.as_ref().map(Arc::clone),
             Arc::clone(&cancellation),
+            &mut config_watch_rx_clone,
         )
         .await
         {
@@ -325,30 +326,30 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         }
     };
 
-    // Wait for web server thread if it exists
+    // Wait for web server task if it exists
     if let Some(handle) = web_handle {
-        let _ = handle.join();
+        let _ = handle.await;
     }
 
     result
 }
 
 async fn run_ghostwriter_loop(
-    shared_config: Arc<RwLock<Config>>,
-    shared_status: Arc<RwLock<GhostwriterStatus>>,
+    shared_config: Arc<TokioRwLock<Config>>,
+    _shared_status: Arc<TokioRwLock<GhostwriterStatus>>,
     shared_touch: Option<Arc<TokioRwLock<Touch>>>,
     cancellation: Arc<GhostwriterCancellation>,
+    config_watch_rx: &mut tokio::sync::watch::Receiver<Config>,
 ) -> Result<()> {
-    let start_time = std::time::Instant::now();
+    info!("Starting ghostwriter with new coordinator architecture");
 
-    // Initialize status
-    {
-        let mut status = shared_status.write().unwrap();
-        status.running = true;
-        status.last_activity = Some("Starting up...".to_string());
-    }
+    // Get initial config
+    let config = shared_config.read().await.clone();
 
-    let mut config = shared_config.read().unwrap().clone();
+    // Create coordinator channels
+    let channels = CoordinatorChannels::new();
+
+    // Initialize devices
     let trigger_corner = TriggerCorner::from_string(&config.trigger_corner)?;
     let keyboard = shared!(Keyboard::new(
         config.is_test_mode() || config.no_draw || config.no_keyboard,
@@ -358,58 +359,192 @@ async fn run_ghostwriter_loop(
 
     let touch = if let Some(shared_touch) = shared_touch {
         shared_touch
-    } else if config.is_test_mode() {
-        let simulation_config = SimulationConfig::from_config(&config);
-        Arc::new(TokioRwLock::new(Touch::new_simulated(simulation_config, trigger_corner)?))
     } else {
         Arc::new(TokioRwLock::new(Touch::new(config.no_draw, trigger_corner)))
     };
 
-    // Give time for the virtual keyboard to be plugged in
-    sleep(Duration::from_millis(1000)).await;
-
-    touch.write().await.tap_middle_bottom().await?;
-    sleep(Duration::from_millis(1000)).await;
-
-    lock!(keyboard).progress("Keyboard loaded...")?;
-
+    // Initialize engine
     let mut engine_options = OptionMap::new();
+    engine_options.insert("model".to_string(), config.model.clone());
 
-    let model = config.model.clone();
-    engine_options.insert("model".to_string(), model.clone());
-    debug!("Model: {}", model);
-
-    let engine_name = determine_engine_name(&config.engine, &model)?;
-    debug!("Engine: {}", engine_name);
-
-    if config.engine_base_url.is_some() {
-        debug!("Engine base URL: {}", config.engine_base_url.clone().unwrap());
-        engine_options.insert("base_url".to_string(), config.engine_base_url.clone().unwrap());
+    let engine_name = determine_engine_name(&config.engine, &config.model)?;
+    if let Some(base_url) = &config.engine_base_url {
+        engine_options.insert("base_url".to_string(), base_url.clone());
     }
-    if config.engine_api_key.is_some() {
-        debug!("Using API key from CLI args");
-        engine_options.insert("api_key".to_string(), config.engine_api_key.clone().unwrap());
+    if let Some(api_key) = &config.engine_api_key {
+        engine_options.insert("api_key".to_string(), api_key.clone());
     }
-
     if config.web_search {
-        debug!("Web search tool enabled");
         engine_options.insert("web_search".to_string(), "true".to_string());
     }
-
     if config.thinking {
-        debug!("Thinking enabled with budget: {}", config.thinking_tokens);
         engine_options.insert("thinking".to_string(), "true".to_string());
         engine_options.insert("thinking_tokens".to_string(), config.thinking_tokens.to_string());
     }
 
     let mut engine = create_engine(&engine_name, &engine_options)?;
 
+    // Register tools
+    register_tools(&mut engine, Arc::clone(&keyboard), Arc::clone(&pen), &config)?;
+
+    let engine = Arc::new(TokioMutex::new(engine));
+
+    // Give keyboard time to initialize
+    sleep(Duration::from_millis(1000)).await;
+    touch.write().await.tap_middle_bottom().await?;
+    sleep(Duration::from_millis(1000)).await;
+    lock!(keyboard).progress("Keyboard loaded...")?;
+    sleep(Duration::from_millis(500)).await;
+    lock!(keyboard).progress_end()?;
+
+    // Spawn long-lived tasks
+    let trigger_handle = {
+        let touch = Arc::clone(&touch);
+        let trigger_tx = channels.trigger_tx.clone();
+        let cancellation = Arc::clone(&cancellation);
+        let no_trigger = config.no_trigger;
+        tokio::spawn(async move { coordinator::trigger_task(touch, trigger_tx, cancellation, no_trigger).await })
+    };
+
+    let progress_handle = {
+        let keyboard = Arc::clone(&keyboard);
+        let progress_rx = channels.progress_rx.clone();
+        let cancellation = Arc::clone(&cancellation);
+        tokio::spawn(async move { coordinator::progress_task(keyboard, progress_rx, cancellation).await })
+    };
+
+    // Main loop
+    let mut trigger_rx = channels.trigger_rx;
+    let progress_tx = channels.progress_tx.clone();
+
+    info!("Main: entering main loop");
+
+    loop {
+        // Update progress to waiting for trigger
+        let _ = progress_tx.send(ProgressState::WaitingForTrigger);
+        info!("Main: waiting for next trigger...");
+
+        tokio::select! {
+            Some(_trigger_event) = trigger_rx.recv() => {
+                info!("Main: trigger received, starting processing");
+
+                // Update progress to indicate we're processing (not waiting for triggers)
+                // let _ = progress_tx.send(ProgressState::TakingScreenshot);
+
+                // Create a new execution cycle for this processing run
+                cancellation.new_execution_cycle();
+
+                // Spawn cancel monitor to allow user to interrupt
+                // let cancel_handle = {
+                //     let touch_clone = Arc::clone(&touch);
+                //     let cancellation_clone = Arc::clone(&cancellation);
+                //     tokio::spawn(async move {
+                //         coordinator::cancel_monitor_task(touch_clone, cancellation_clone).await
+                //     })
+                // };
+
+                // Spawn processing task
+                let processing_handle = {
+                    let config_clone = config.clone();
+                    let engine_clone = Arc::clone(&engine);
+                    let progress_tx_clone = progress_tx.clone();
+                    let cancellation_clone = Arc::clone(&cancellation);
+                    tokio::spawn(async move {
+                        coordinator::processing_task(
+                            config_clone,
+                            engine_clone,
+                            progress_tx_clone,
+                            cancellation_clone,
+                        ).await
+                    })
+                };
+
+                // Wait for either processing to complete or user to cancel
+                // The cancel_monitor will trigger cancellation which processing_task respects
+                let processing_result = processing_handle.await;
+
+                // Cancel the cancel monitor (it may still be waiting)
+                cancellation.cancel_execution();
+                // let _ = tokio::time::timeout(
+                //     Duration::from_millis(100),
+                //     cancel_handle
+                // ).await;
+
+                match processing_result {
+                    Ok(Ok(_)) => {
+                        info!("Processing completed successfully, ready for next trigger");
+                    }
+                    Ok(Err(e)) => {
+                        info!("Processing error: {}, ready for next trigger", e);
+                    }
+                    Err(e) => {
+                        info!("Processing task join error: {}, ready for next trigger", e);
+                    }
+                }
+
+                // Check no_loop mode
+                if config.no_loop {
+                    info!("No-loop mode, exiting");
+                    std::process::exit(0);
+                }
+
+                // Drain any triggers that arrived during processing
+                while trigger_rx.try_recv().is_ok() {
+                    info!("Ignoring trigger received during processing");
+                }
+            }
+
+            // Wait for config changes via watch channel (priority 2)
+            _ = config_watch_rx.changed() => {
+                info!("Config changed via watch channel, restarting loop");
+                cancellation.cancel_execution();
+                break; // Exit loop to clean up and restart
+            }
+        }
+    }
+
+    // Clean shutdown - wait for tasks to complete
+    info!("Main: shutting down tasks");
+
+    // Cancel any ongoing execution and tasks
+    cancellation.cancel_execution();
+
+    // Give tasks a moment to notice cancellation
+    sleep(Duration::from_millis(100)).await;
+
+    // Wait for tasks with timeout to prevent hanging
+    let shutdown_timeout = Duration::from_secs(2);
+
+    match tokio::time::timeout(shutdown_timeout, trigger_handle).await {
+        Ok(Ok(Ok(_))) => info!("Trigger task completed successfully"),
+        Ok(Ok(Err(e))) => info!("Trigger task error: {}", e),
+        Ok(Err(e)) => info!("Trigger task join error: {}", e),
+        Err(_) => {
+            info!("Trigger task shutdown timed out - this is expected in no-trigger mode");
+        }
+    }
+
+    match tokio::time::timeout(shutdown_timeout, progress_handle).await {
+        Ok(Ok(Ok(_))) => info!("Progress task completed successfully"),
+        Ok(Ok(Err(e))) => info!("Progress task error: {}", e),
+        Ok(Err(e)) => info!("Progress task join error: {}", e),
+        Err(_) => info!("Progress task shutdown timed out"),
+    }
+
+    info!("Main: clean shutdown complete");
+    Ok(())
+}
+
+// Helper function to register tools with the engine
+fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, config: &Config) -> Result<()> {
+    use serde_json::Value as json;
+
+    // Register draw_text tool
     let output_file = config.output_file.clone();
     let no_draw = config.no_draw;
     let keyboard_clone = Arc::clone(&keyboard);
 
     let tool_config_draw_text = load_config("tool_draw_text.json");
-
     engine.register_tool(
         "draw_text",
         serde_json::from_str::<serde_json::Value>(tool_config_draw_text.as_str())?,
@@ -427,7 +562,6 @@ async fn run_ghostwriter_loop(
                 }
             }
             if !no_draw {
-                // let mut keyboard = lock!(keyboard_clone);
                 if let Err(e) = draw_text(text, &mut lock!(keyboard_clone)) {
                     log::error!("Failed to draw text: {}", e);
                 }
@@ -435,13 +569,14 @@ async fn run_ghostwriter_loop(
         }),
     );
 
-    let output_file = config.output_file.clone();
-    let save_bitmap = config.save_bitmap.clone();
-    let no_draw = config.no_draw;
-    let keyboard_clone = Arc::clone(&keyboard);
-    let pen_clone = Arc::clone(&pen);
-
+    // Register draw_svg tool
     if !config.no_svg {
+        let output_file = config.output_file.clone();
+        let save_bitmap = config.save_bitmap.clone();
+        let no_draw = config.no_draw;
+        let keyboard_clone = Arc::clone(&keyboard);
+        let pen_clone = Arc::clone(&pen);
+
         let tool_config_draw_svg = load_config("tool_draw_svg.json");
         engine.register_tool(
             "draw_svg",
@@ -468,241 +603,5 @@ async fn run_ghostwriter_loop(
         );
     }
 
-    lock!(keyboard).progress("Tools initialized.")?;
-    sleep(Duration::from_millis(1000)).await;
-    lock!(keyboard).progress_end()?;
-    sleep(Duration::from_millis(1000)).await;
-
-    loop {
-        info!("Starting new execution loop");
-
-        // Start a new execution cycle
-        cancellation.new_execution_cycle();
-
-        // Check for config updates and reload if necessary
-        let current_config = {
-            let config_guard = shared_config.read().unwrap();
-            config_guard.clone()
-        };
-
-        // Update status with current config info
-        {
-            let mut status = shared_status.write().unwrap();
-            status.uptime_seconds = start_time.elapsed().as_secs();
-            status.current_model = current_config.model.clone();
-            status.current_prompt = current_config.prompt.clone();
-            status.waiting_for_trigger = !current_config.no_trigger;
-            status.processing = false;
-            status.error = None;
-        }
-
-        // Check if any config changed that requires restarting the loop
-        let config_changed = current_config != config;
-        if config_changed {
-            info!("Configuration change detected, restarting ghostwriter loop to pick up all changes");
-            return Ok(()); // Exit the current loop so it can be restarted with new config
-        }
-
-        // Update our local config reference
-        config = current_config;
-
-        if config.no_trigger {
-            debug!("Skipping waiting for trigger");
-
-            // Update status
-            {
-                let mut status = shared_status.write().unwrap();
-                status.last_activity = Some("Auto-triggering (no trigger mode)".to_string());
-            }
-        } else {
-            info!(
-                "Waiting for trigger (hand-touch in the {} corner)...",
-                match TriggerCorner::from_string(&config.trigger_corner).unwrap() {
-                    TriggerCorner::UpperRight => "upper-right",
-                    TriggerCorner::UpperLeft => "upper-left",
-                    TriggerCorner::LowerRight => "lower-right",
-                    TriggerCorner::LowerLeft => "lower-left",
-                }
-            );
-
-            // Update status
-            {
-                let mut status = shared_status.write().unwrap();
-                status.last_activity = Some("Waiting for trigger...".to_string());
-                status.waiting_for_trigger = true;
-            }
-
-            match touch.write().await.wait_for_trigger(&cancellation).await {
-                Ok(()) => {
-                    // Trigger received normally
-                }
-                Err(e) => {
-                    if e.to_string().contains("cancelled") {
-                        info!("Touch waiting cancelled (likely due to config change)");
-                        continue; // Go to next loop iteration to check new config
-                    } else {
-                        return Err(e); // Propagate other errors
-                    }
-                }
-            }
-
-            // Update status after trigger
-            {
-                let mut status = shared_status.write().unwrap();
-                status.last_activity = Some("Trigger received, processing...".to_string());
-                status.waiting_for_trigger = false;
-                status.processing = true;
-            }
-        }
-
-        // Sleep a bit to differentiate the touches
-        sleep(Duration::from_millis(100)).await;
-        touch.write().await.tap_middle_bottom().await?;
-        // sleep(Duration::from_millis(1000));
-        // lock!(keyboard).progress("Taking screenshot...")?;
-
-        // Update status for execution count and processing step
-        {
-            let mut status = shared_status.write().unwrap();
-            status.executions_count += 1;
-            status.last_activity = Some("Taking screenshot...".to_string());
-        }
-
-        info!("Getting screenshot (or loading input image)");
-        let base64_image = if let Some(input_png) = &config.input_png {
-            BASE64_STANDARD.encode(std::fs::read(input_png)?)
-        } else {
-            let mut screenshot = if config.is_test_mode() {
-                let simulation_config = SimulationConfig::from_config(&config);
-                Screenshot::new_simulated(simulation_config)?
-            } else {
-                Screenshot::new()?
-            };
-            screenshot.take_screenshot()?;
-            if let Some(save_screenshot) = &config.save_screenshot {
-                info!("Saving screenshot to {}", save_screenshot);
-                screenshot.save_image(save_screenshot)?;
-            }
-            screenshot.base64()?
-        };
-        info!(" ... Done getting screenshot (or loading input image)");
-
-        if config.no_submit {
-            info!("Image not submitted to model due to --no-submit flag");
-            lock!(keyboard).progress_end()?;
-            return Ok(());
-        }
-
-        // Update status
-        {
-            let mut status = shared_status.write().unwrap();
-            status.last_activity = Some("Loading prompt...".to_string());
-        }
-
-        let prompt_general_raw = load_config(&config.prompt);
-        let prompt_general_json = serde_json::from_str::<serde_json::Value>(prompt_general_raw.as_str())?;
-        let prompt = prompt_general_json["prompt"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Prompt file '{}' missing required 'prompt' field", config.prompt))?;
-
-        let segmentation_description = if config.apply_segmentation {
-            // Update status
-            {
-                let mut status = shared_status.write().unwrap();
-                status.last_activity = Some("Analyzing image segmentation...".to_string());
-            }
-
-            info!("Building image segmentation");
-            lock!(keyboard).progress("segmenting...")?;
-            let input_filename = config
-                .input_png
-                .clone()
-                .or_else(|| config.save_screenshot.clone())
-                .ok_or_else(|| anyhow::anyhow!("Segmentation requires either --input-png or --save-screenshot to be specified"))?;
-            match analyze_image(input_filename.as_str()) {
-                Ok(description) => description,
-                Err(e) => format!("Error analyzing image: {}", e),
-            }
-        } else {
-            String::new()
-        };
-        debug!("Segmentation description: {}", segmentation_description);
-
-        // Update status before model execution
-        {
-            let mut status = shared_status.write().unwrap();
-            status.last_activity = Some("Preparing model input...".to_string());
-        }
-
-        engine.clear_content();
-        engine.add_image_content(&base64_image);
-
-        if config.apply_segmentation {
-            engine.add_text_content(
-               format!("Here are interesting regions based on an automatic segmentation algorithm. Use them to help identify the exact location of interesting features.\n\n{}", segmentation_description).as_str()
-            );
-        }
-
-        engine.add_text_content(prompt);
-
-        // Update status before model execution
-        {
-            let mut status = shared_status.write().unwrap();
-            status.last_activity = Some(format!("Executing {} model...", config.model));
-        }
-
-        info!("Executing the engine (call out to {}", engine_name);
-        lock!(keyboard).progress("thinking...")?;
-
-        // Start progressive dots timer
-        let keyboard_for_timer = Arc::clone(&keyboard);
-        let timer_cancellation = Arc::new(AtomicBool::new(false));
-        let timer_cancellation_clone = Arc::clone(&timer_cancellation);
-
-        let timer_task = tokio::spawn(async move {
-            while !timer_cancellation_clone.load(Ordering::Relaxed) {
-                sleep(Duration::from_millis(500)).await;
-                if !timer_cancellation_clone.load(Ordering::Relaxed) {
-                    if let Err(e) = lock!(keyboard_for_timer).progress(".") {
-                        log::debug!("Failed to update thinking progress: {}", e);
-                    }
-                }
-            }
-        });
-
-        // Create status callback that stops the timer
-        let timer_stop = Arc::clone(&timer_cancellation);
-        let status_callback = Some(Box::new(move |status: ModelExecutionStatus| {
-            if status == ModelExecutionStatus::ProcessingResponse {
-                timer_stop.store(true, Ordering::Relaxed);
-            }
-        }) as StatusCallback);
-
-        let execution_result = engine.execute(&cancellation, status_callback).await;
-
-        // Stop the timer and wait for task to complete
-        timer_cancellation.store(true, Ordering::Relaxed);
-        let _ = timer_task.await;
-
-        // Update status after execution
-        {
-            let mut status = shared_status.write().unwrap();
-            if execution_result.is_err() {
-                status.last_activity = Some("Model execution failed".to_string());
-                status.error = Some("Model execution error".to_string());
-            } else {
-                status.last_activity = Some("Model execution completed".to_string());
-                status.error = None;
-            }
-            status.processing = false;
-        }
-
-        if execution_result.is_err() {
-            lock!(keyboard).progress(" model error. ")?;
-        }
-
-        if config.no_loop {
-            break Ok(());
-        }
-    }
+    Ok(())
 }

@@ -30,7 +30,7 @@ macro_rules! status_update {
 pub(crate) use status_update;
 
 #[async_trait::async_trait]
-pub trait LLMEngine {
+pub trait LLMEngine: Send {
     fn new(options: &HashMap<String, String>) -> Self
     where
         Self: Sized;

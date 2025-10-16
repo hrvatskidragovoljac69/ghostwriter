@@ -90,6 +90,10 @@ impl LLMEngine for Anthropic {
     }
 
     async fn execute(&mut self, cancellation: &GhostwriterCancellation, mut status_callback: Option<super::StatusCallback>) -> Result<()> {
+
+        // Notify that we're building context
+        status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
+
         let mut tool_definitions = self.tools.iter().map(Self::anthropic_tool_definition).collect::<Vec<_>>();
 
         // Add web search tool if enabled
@@ -125,8 +129,6 @@ impl LLMEngine for Anthropic {
 
         debug!("Request: {}", body);
 
-        // Notify that we're building context
-        status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
 
         // Notify that we're processing with LLM
         status_update!(status_callback, super::ModelExecutionStatus::LlmProcessing);

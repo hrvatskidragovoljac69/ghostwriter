@@ -5,7 +5,7 @@ use anyhow::Result;
 use log::{info, warn};
 use serde_json::{json, Value};
 use std::convert::Infallible;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::RwLock as TokioRwLock;
 use warp::http::StatusCode;
 use warp::reply::{json as reply_json, with_status};
@@ -20,10 +20,11 @@ const WEB_FILES: &[(&str, &str, &str)] = &[
 /// Start the web server on the specified port with shared state
 pub async fn start_web_server(
     port: u16,
-    shared_config: Arc<RwLock<Config>>,
-    shared_status: Arc<RwLock<GhostwriterStatus>>,
+    shared_config: Arc<TokioRwLock<Config>>,
+    shared_status: Arc<TokioRwLock<GhostwriterStatus>>,
     shared_touch: Option<Arc<TokioRwLock<Touch>>>,
     cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
+    config_watch_tx: Option<Arc<tokio::sync::watch::Sender<Config>>>,
 ) -> Result<()> {
     info!("Starting web server on port {}", port);
 
@@ -38,6 +39,7 @@ pub async fn start_web_server(
     let config_for_post = Arc::clone(&shared_config);
     let status_for_get = Arc::clone(&shared_status);
     let cancellation_for_config = cancellation.clone();
+    let config_watch_tx_for_post = config_watch_tx.clone();
 
     let api_routes = warp::path("api").and(
         // GET /api/config
@@ -52,6 +54,7 @@ pub async fn start_web_server(
                     .and(warp::body::json())
                     .and(warp::any().map(move || Arc::clone(&config_for_post)))
                     .and(warp::any().map(move || cancellation_for_config.clone()))
+                    .and(warp::any().map(move || config_watch_tx_for_post.clone()))
                     .and_then(save_config_handler),
             )
             .or(
@@ -124,20 +127,16 @@ async fn simulation_trigger_handler(trigger_data: Value, shared_touch: Option<Ar
     }
 }
 
-async fn get_config_handler(shared_config: Arc<RwLock<Config>>) -> Result<impl Reply, Rejection> {
-    match shared_config.read() {
-        Ok(config) => Ok(reply_json(&*config)),
-        Err(e) => {
-            warn!("Failed to read shared config: {}", e);
-            Err(warp::reject::custom(ConfigError::Load(e.to_string())))
-        }
-    }
+async fn get_config_handler(shared_config: Arc<TokioRwLock<Config>>) -> Result<impl Reply, Rejection> {
+    let config = shared_config.read().await;
+    Ok(reply_json(&*config))
 }
 
 async fn save_config_handler(
     config: Config,
-    shared_config: Arc<RwLock<Config>>,
+    shared_config: Arc<TokioRwLock<Config>>,
     cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
+    config_watch_tx: Option<Arc<tokio::sync::watch::Sender<Config>>>,
 ) -> Result<impl Reply, Rejection> {
     // Validate the config before saving
     if let Err(e) = config.validate() {
@@ -146,17 +145,18 @@ async fn save_config_handler(
     }
 
     // Update shared config first (for immediate effect)
-    match shared_config.write() {
-        Ok(mut shared) => {
-            *shared = config.clone();
-        }
-        Err(e) => {
-            warn!("Failed to update shared config: {}", e);
-            return Err(warp::reject::custom(ConfigError::Save(e.to_string())));
-        }
+    {
+        let mut shared = shared_config.write().await;
+        *shared = config.clone();
     }
 
-    // Trigger cancellation to interrupt current execution and apply config changes
+    // Notify main loop via watch channel (preferred method)
+    if let Some(watch_tx) = &config_watch_tx {
+        info!("Broadcasting config change via watch channel");
+        let _ = watch_tx.send(config.clone());
+    }
+
+    // Also trigger cancellation to interrupt current execution
     if let Some(cancellation) = &cancellation {
         info!("Triggering cancellation due to config change from web interface");
         cancellation.cancel_execution();
@@ -178,14 +178,9 @@ async fn save_config_handler(
     }
 }
 
-async fn get_status_handler(shared_status: Arc<RwLock<GhostwriterStatus>>) -> Result<impl Reply, Rejection> {
-    match shared_status.read() {
-        Ok(status) => Ok(reply_json(&*status)),
-        Err(e) => {
-            warn!("Failed to read shared status: {}", e);
-            Err(warp::reject::custom(ConfigError::Load(e.to_string())))
-        }
-    }
+async fn get_status_handler(shared_status: Arc<TokioRwLock<GhostwriterStatus>>) -> Result<impl Reply, Rejection> {
+    let status = shared_status.read().await;
+    Ok(reply_json(&*status))
 }
 
 #[derive(Debug)]
