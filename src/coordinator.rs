@@ -235,14 +235,11 @@ pub async fn progress_task(
                         ProgressState::BuildingContext => {
                             info!("Progress: Building context...");
                             if let Ok(mut kb) = keyboard.lock() {
-                                let _ = kb.progress("Thinking (context)");
+                                let _ = kb.progress("Thinking");
                             }
                         }
                         ProgressState::Thinking => {
                             info!("Progress: Thinking...");
-                            if let Ok(mut kb) = keyboard.lock() {
-                                let _ = kb.progress("Thinking (progress)");
-                            }
                         }
                         ProgressState::ProcessingResponse => {
                             info!("Progress: Processing response...");
@@ -287,7 +284,9 @@ pub async fn processing_task(
     info!("Processing task: starting");
 
     // Update progress: taking screenshot
+    info!("Setting ProcessState::TakingScreenshot");
     let _ = progress_tx.send(ProgressState::TakingScreenshot);
+    tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
 
     // Take screenshot
     let screenshot_path = config.save_screenshot.clone();
@@ -316,6 +315,7 @@ pub async fn processing_task(
 
     // Update progress: building context
     let _ = progress_tx.send(ProgressState::BuildingContext);
+    tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
 
     // Apply segmentation if requested
     let segmentation_description = if config.apply_segmentation {

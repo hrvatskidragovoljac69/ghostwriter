@@ -194,11 +194,9 @@ macro_rules! lock {
 
 fn draw_text(text: &str, keyboard: &mut Keyboard) -> Result<()> {
     info!("Drawing text to the screen.");
-    // keyboard.progress(".")?;
     keyboard.progress_end()?;
     keyboard.key_cmd_body()?;
     keyboard.string_to_keypresses(text)?;
-    // keyboard.string_to_keypresses("\n\n")?;
     Ok(())
 }
 
@@ -355,6 +353,7 @@ async fn run_ghostwriter_loop(
         config.is_test_mode() || config.no_draw || config.no_keyboard,
         config.no_draw_progress,
     ));
+
     let pen = shared!(Pen::new(config.is_test_mode() || config.no_draw));
 
     let touch = if let Some(shared_touch) = shared_touch {
@@ -362,6 +361,14 @@ async fn run_ghostwriter_loop(
     } else {
         Arc::new(TokioRwLock::new(Touch::new(config.no_draw, trigger_corner)))
     };
+
+    // Give keyboard time to initialize
+    // sleep(Duration::from_millis(1000)).await;
+    touch.write().await.tap_middle_bottom().await?;
+    // sleep(Duration::from_millis(1000)).await;
+    lock!(keyboard).progress("Ghostwriter starting...")?;
+    sleep(Duration::from_millis(500)).await;
+    lock!(keyboard).progress_end()?;
 
     // Initialize engine
     let mut engine_options = OptionMap::new();
@@ -389,13 +396,6 @@ async fn run_ghostwriter_loop(
 
     let engine = Arc::new(TokioMutex::new(engine));
 
-    // Give keyboard time to initialize
-    sleep(Duration::from_millis(1000)).await;
-    touch.write().await.tap_middle_bottom().await?;
-    sleep(Duration::from_millis(1000)).await;
-    lock!(keyboard).progress("Keyboard loaded...")?;
-    sleep(Duration::from_millis(500)).await;
-    lock!(keyboard).progress_end()?;
 
     // Spawn long-lived tasks
     let trigger_handle = {
