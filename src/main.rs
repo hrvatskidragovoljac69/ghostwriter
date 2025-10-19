@@ -367,7 +367,7 @@ async fn run_ghostwriter_loop(
     touch.write().await.tap_middle_bottom().await?;
     // sleep(Duration::from_millis(1000)).await;
     lock!(keyboard).progress("Ghostwriter starting...")?;
-    sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(1000)).await;
     lock!(keyboard).progress_end()?;
 
     // Initialize engine
@@ -449,12 +449,14 @@ async fn run_ghostwriter_loop(
                     let engine_clone = Arc::clone(&engine);
                     let progress_tx_clone = progress_tx.clone();
                     let cancellation_clone = Arc::clone(&cancellation);
+                    let touch_clone = Arc::clone(&touch);
                     tokio::spawn(async move {
                         coordinator::processing_task(
                             config_clone,
                             engine_clone,
                             progress_tx_clone,
                             cancellation_clone,
+                            touch_clone,
                         ).await
                     })
                 };
@@ -536,7 +538,12 @@ async fn run_ghostwriter_loop(
 }
 
 // Helper function to register tools with the engine
-fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, config: &Config) -> Result<()> {
+fn register_tools(
+    engine: &mut Box<dyn LLMEngine>,
+    keyboard: Arc<Mutex<Keyboard>>,
+    pen: Arc<Mutex<Pen>>,
+    config: &Config,
+) -> Result<()> {
     use serde_json::Value as json;
 
     // Register draw_text tool

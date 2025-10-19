@@ -128,11 +128,19 @@ pub async fn trigger_task(
             Ok(()) => {
                 debug!("Trigger task: wait_for_trigger returned Ok, touch detected");
                 info!("Trigger task: touch detected");
+
+                // Drop the lock before sending the event so processing_task can acquire it
+                drop(touch_guard);
+                debug!("Trigger task: dropped touch write lock");
+
                 if trigger_tx.send(TriggerEvent::UserTouch).await.is_err() {
                     info!("Trigger receiver dropped, exiting trigger task");
                     break;
                 }
                 debug!("Trigger task: sent trigger event, continuing loop");
+
+                // Give processing_task a moment to acquire the lock before we loop back
+                sleep(Duration::from_millis(50)).await;
             }
             Err(e) => {
                 debug!("Trigger task: wait_for_trigger returned Err: {}", e);
@@ -276,6 +284,7 @@ pub async fn processing_task(
     engine: Arc<TokioMutex<Box<dyn LLMEngine>>>,
     progress_tx: watch::Sender<ProgressState>,
     cancellation: Arc<GhostwriterCancellation>,
+    touch: Arc<tokio::sync::RwLock<Touch>>,
 ) -> Result<()> {
     info!("Processing task: starting");
 
@@ -307,6 +316,11 @@ pub async fn processing_task(
         info!("Skipping LLM submission (no_submit mode)");
         let _ = progress_tx.send(ProgressState::Done);
         return Ok(());
+    }
+
+    // Tap middle bottom to position cursor for text input (before showing "Thinking")
+    if let Err(e) = touch.write().await.tap_middle_bottom().await {
+        info!("Failed to tap middle bottom: {}", e);
     }
 
     // Update progress: building context
