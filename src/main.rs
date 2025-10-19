@@ -296,7 +296,15 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         let port = args.web_port;
 
         Some(tokio::spawn(async move {
-            start_web_server(port, config_clone, status_clone, touch_clone, Some(cancellation_clone), Some(config_watch_tx_clone)).await
+            start_web_server(
+                port,
+                config_clone,
+                status_clone,
+                touch_clone,
+                Some(cancellation_clone),
+                Some(config_watch_tx_clone),
+            )
+            .await
         }))
     } else {
         None
@@ -395,7 +403,6 @@ async fn run_ghostwriter_loop(
     register_tools(&mut engine, Arc::clone(&keyboard), Arc::clone(&pen), &config)?;
 
     let engine = Arc::new(TokioMutex::new(engine));
-
 
     // Spawn long-lived tasks
     let trigger_handle = {
@@ -538,12 +545,7 @@ async fn run_ghostwriter_loop(
 }
 
 // Helper function to register tools with the engine
-fn register_tools(
-    engine: &mut Box<dyn LLMEngine>,
-    keyboard: Arc<Mutex<Keyboard>>,
-    pen: Arc<Mutex<Pen>>,
-    config: &Config,
-) -> Result<()> {
+fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, config: &Config) -> Result<()> {
     use serde_json::Value as json;
 
     // Register draw_text tool

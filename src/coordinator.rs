@@ -161,10 +161,7 @@ pub async fn trigger_task(
 }
 
 /// Task that monitors for cancel touch during processing
-pub async fn cancel_monitor_task(
-    touch: Arc<tokio::sync::RwLock<Touch>>,
-    cancellation: Arc<GhostwriterCancellation>,
-) -> Result<()> {
+pub async fn cancel_monitor_task(touch: Arc<tokio::sync::RwLock<Touch>>, cancellation: Arc<GhostwriterCancellation>) -> Result<()> {
     info!("Cancel monitor task: starting");
 
     // Wait for any touch to cancel
@@ -291,7 +288,7 @@ pub async fn processing_task(
     // Update progress: taking screenshot
     info!("Setting ProgressState::TakingScreenshot");
     let _ = progress_tx.send(ProgressState::TakingScreenshot);
-    tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
+    tokio::time::sleep(Duration::from_millis(10)).await; // Give progress_task time
 
     // Take screenshot
     let screenshot_path = config.save_screenshot.clone();
@@ -325,7 +322,7 @@ pub async fn processing_task(
 
     // Update progress: building context
     let _ = progress_tx.send(ProgressState::LlmState(ModelExecutionStatus::BuildingContext));
-    tokio::time::sleep(Duration::from_millis(10)).await;  // Give progress_task time
+    tokio::time::sleep(Duration::from_millis(10)).await; // Give progress_task time
 
     // Apply segmentation if requested
     let segmentation_description = if config.apply_segmentation {

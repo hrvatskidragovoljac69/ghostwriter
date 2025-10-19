@@ -50,8 +50,8 @@ const ABS_MT_PRESSURE: u16 = 58;
 
 pub enum TouchMode {
     Real {
-        input_device: Option<Device>, // For sending touch events
-        event_stream: Option<EventStream>,  // For reading touch events
+        input_device: Option<Device>,      // For sending touch events
+        event_stream: Option<EventStream>, // For reading touch events
         device_model: DeviceModel,
     },
     Simulated {
@@ -111,7 +111,9 @@ impl Touch {
                 debug!("wait_for_trigger: using Simulated mode");
                 simulator.wait_for_trigger(cancellation).await
             }
-            TouchMode::Real { event_stream, device_model, .. } => {
+            TouchMode::Real {
+                event_stream, device_model, ..
+            } => {
                 debug!("wait_for_trigger: using Real device mode");
                 let trigger_corner = self.trigger_corner;
                 Self::wait_for_real_trigger(event_stream, device_model, trigger_corner, cancellation).await
