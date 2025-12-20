@@ -279,8 +279,9 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         None
     };
 
-    // Create cancellation object to be shared between main loop and web server
-    let cancellation = Arc::new(GhostwriterCancellation::new());
+    // Create cancellation holder to be updated on each restart
+    // We use Arc<TokioRwLock> so web server can read current cancellation
+    let shared_cancellation = Arc::new(TokioRwLock::new(GhostwriterCancellation::new()));
 
     // Create config watch channel for communication between web server and main loop
     let (config_watch_tx, config_watch_rx) = tokio::sync::watch::channel(config.clone());
@@ -291,7 +292,7 @@ async fn ghostwriter(args: &Args) -> Result<()> {
         let config_clone = Arc::clone(&shared_config);
         let status_clone = Arc::clone(&shared_status);
         let touch_clone = shared_touch.as_ref().map(Arc::clone);
-        let cancellation_clone = Arc::clone(&cancellation);
+        let cancellation_clone = Arc::clone(&shared_cancellation);
         let config_watch_tx_clone = Arc::clone(&shared_config_watch_tx);
         let port = args.web_port;
 
@@ -311,14 +312,24 @@ async fn ghostwriter(args: &Args) -> Result<()> {
     };
 
     // Run main ghostwriter logic, restarting on config changes
+    // Keep a single receiver across iterations to avoid spurious change notifications
+    let mut persistent_config_watch_rx = config_watch_rx.clone();
     let result = loop {
-        let mut config_watch_rx_clone = config_watch_rx.clone();
+        // Create fresh cancellation for each iteration
+        let cancellation = Arc::new(GhostwriterCancellation::new());
+
+        // Update shared cancellation for web server
+        if args.web_server {
+            let mut shared_cancel = shared_cancellation.write().await;
+            *shared_cancel = (*cancellation).clone();
+        }
+
         match run_ghostwriter_loop(
             Arc::clone(&shared_config),
             Arc::clone(&shared_status),
             shared_touch.as_ref().map(Arc::clone),
-            Arc::clone(&cancellation),
-            &mut config_watch_rx_clone,
+            cancellation,
+            &mut persistent_config_watch_rx,
         )
         .await
         {
@@ -506,7 +517,7 @@ async fn run_ghostwriter_loop(
             // Wait for config changes via watch channel (priority 2)
             _ = config_watch_rx.changed() => {
                 info!("Config changed via watch channel, restarting loop");
-                cancellation.cancel_execution();
+                cancellation.cancel_all(); // Cancel all tokens to ensure clean shutdown
                 break; // Exit loop to clean up and restart
             }
         }

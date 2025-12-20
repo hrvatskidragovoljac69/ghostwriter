@@ -23,7 +23,7 @@ pub async fn start_web_server(
     shared_config: Arc<TokioRwLock<Config>>,
     shared_status: Arc<TokioRwLock<GhostwriterStatus>>,
     shared_touch: Option<Arc<TokioRwLock<Touch>>>,
-    cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
+    cancellation: Option<Arc<TokioRwLock<crate::cancellation::GhostwriterCancellation>>>,
     config_watch_tx: Option<Arc<tokio::sync::watch::Sender<Config>>>,
 ) -> Result<()> {
     info!("Starting web server on port {}", port);
@@ -135,7 +135,7 @@ async fn get_config_handler(shared_config: Arc<TokioRwLock<Config>>) -> Result<i
 async fn save_config_handler(
     config: Config,
     shared_config: Arc<TokioRwLock<Config>>,
-    cancellation: Option<Arc<crate::cancellation::GhostwriterCancellation>>,
+    cancellation: Option<Arc<TokioRwLock<crate::cancellation::GhostwriterCancellation>>>,
     config_watch_tx: Option<Arc<tokio::sync::watch::Sender<Config>>>,
 ) -> Result<impl Reply, Rejection> {
     // Validate the config before saving
@@ -159,7 +159,8 @@ async fn save_config_handler(
     // Also trigger cancellation to interrupt current execution
     if let Some(cancellation) = &cancellation {
         info!("Triggering cancellation due to config change from web interface");
-        cancellation.cancel_execution();
+        let cancel_guard = cancellation.read().await;
+        cancel_guard.cancel_execution();
     }
 
     // Also save to file

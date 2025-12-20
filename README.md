@@ -248,6 +248,10 @@ When I want to do a build for others, I tag main with like `v2026.09.21-01` and 
   * Thinking about custom prompts and how annoying it is to set up, I'm now contemplating a web-interface that would let you enter API keys, manage prompts, and maybe do some debugging
   * Last time I worked on this was before I started using claude-code. I'm having it do some work for me now
   * Added `--trigger-corner LR` (and similar) to set the corner for activation
+* **2025-12-06** -- Try out Gemma 3
+  * I accidentally updated ... but the rmpp linux is already released! Previously I often had to email and request it
+  * ... but to my surprise the uinput module is already there!!! Still had to be loaded, but I no longer need to custom build it!
+  * 
 
 ## Ideas
 * [DONE] Matt showed me his iOS super calc that just came out, take inspiration from that!
