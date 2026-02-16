@@ -91,6 +91,12 @@ pub fn setup_uinput() -> Result<()> {
         return Ok(());
     }
 
+    // If /dev/uinput already exists, the kernel has uinput built in
+    if std::path::Path::new("/dev/uinput").exists() {
+        info!("/dev/uinput exists, kernel has uinput built in, skipping module loading");
+        return Ok(());
+    }
+
     // Check if uinput module is loaded by looking at the lsmod output
     let output = std::process::Command::new("lsmod").output().expect("Failed to execute lsmod");
     let output_str = std::str::from_utf8(&output.stdout).unwrap();
