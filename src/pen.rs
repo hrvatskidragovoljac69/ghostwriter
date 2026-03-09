@@ -68,23 +68,39 @@ impl Pen {
     }
 
     pub fn draw_bitmap(&mut self, bitmap: &[Vec<bool>]) -> Result<()> {
+        self.draw_bitmap_scaled(bitmap, 1)
+    }
+
+    /// Draw a bitmap where bitmap dimensions may differ from the virtual coordinate space.
+    /// `scale` = bitmap_size / virtual_size — e.g. scale=2 means a 1536×2048 bitmap
+    /// that maps to the 768×1024 virtual space at half-unit precision per pixel.
+    /// Input coordinates are computed directly from bitmap pixel position for true sub-pixel accuracy,
+    /// bypassing integer rounding through the virtual coordinate space.
+    pub fn draw_bitmap_scaled(&mut self, bitmap: &[Vec<bool>], scale: u32) -> Result<()> {
+        let max_x = self.max_x_value() as f32;
+        let max_y = self.max_y_value() as f32;
+        let bmp_w = VIRTUAL_WIDTH as f32 * scale as f32;
+        let bmp_h = VIRTUAL_HEIGHT as f32 * scale as f32;
+
         let mut is_pen_down = false;
         for (y, row) in bitmap.iter().enumerate() {
             for (x, &pixel) in row.iter().enumerate() {
                 if pixel {
+                    let ix = ((x as f32 / bmp_w) * max_x).round() as i32;
+                    let iy = ((y as f32 / bmp_h) * max_y).round() as i32;
                     if !is_pen_down {
-                        self.pen_down_at(self.virtual_to_input((x as i32, y as i32)))?;
+                        self.pen_down_at((ix, iy))?;
                         is_pen_down = true;
                         sleep(Duration::from_millis(1));
                     }
-                    self.goto_xy_virtual((x as i32, y as i32))?;
-                    self.goto_xy_virtual((x as i32 + 1, y as i32))?;
+                    self.goto_xy((ix, iy))?;
                 } else if is_pen_down {
                     self.pen_up()?;
                     is_pen_down = false;
                     sleep(Duration::from_millis(1));
                 }
             }
+            // Lift at end of every row for clean horizontal-run boundaries
             self.pen_up()?;
             is_pen_down = false;
             sleep(Duration::from_millis(5));
@@ -321,6 +337,207 @@ impl Pen {
 
             self.pen_up()?;
             sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    /// Draw a bitmap bidirectionally — alternating L→R and R→L per row.
+    /// This cancels the directional bias that causes horizontal leaking.
+    pub fn draw_bitmap_bidi(&mut self, bitmap: &[Vec<bool>], scale: u32) -> Result<()> {
+        let max_x = self.max_x_value() as f32;
+        let max_y = self.max_y_value() as f32;
+        let bmp_w = VIRTUAL_WIDTH as f32 * scale as f32;
+        let bmp_h = VIRTUAL_HEIGHT as f32 * scale as f32;
+
+        let mut is_pen_down = false;
+        for (y, row) in bitmap.iter().enumerate() {
+            let iy = ((y as f32 / bmp_h) * max_y).round() as i32;
+            let cols = row.len();
+
+            // Collect runs in this row
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut run_start: Option<usize> = None;
+            for (x, &pixel) in row.iter().enumerate() {
+                match (pixel, run_start) {
+                    (true, None) => run_start = Some(x),
+                    (false, Some(s)) => {
+                        runs.push((s, x - 1));
+                        run_start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(s) = run_start {
+                runs.push((s, cols - 1));
+            }
+
+            // Even rows: L→R, odd rows: R→L
+            let go_left = (y % 2) == 1;
+            let ordered_runs: Vec<(usize, usize)> = if go_left {
+                runs.iter().rev().cloned().collect()
+            } else {
+                runs.clone()
+            };
+
+            for (x_start, x_end) in ordered_runs {
+                // For L→R draw start→end; for R→L draw end→start
+                let (draw_from, draw_to) = if go_left {
+                    (x_end, x_start)
+                } else {
+                    (x_start, x_end)
+                };
+
+                let ix_from = ((draw_from as f32 / bmp_w) * max_x).round() as i32;
+                let ix_to = ((draw_to as f32 / bmp_w) * max_x).round() as i32;
+
+                if is_pen_down {
+                    self.pen_up()?;
+                    is_pen_down = false;
+                    sleep(Duration::from_millis(1));
+                }
+                self.pen_down_at((ix_from, iy))?;
+                is_pen_down = true;
+                sleep(Duration::from_millis(1));
+                self.goto_xy((ix_to, iy))?;
+                self.pen_up()?;
+                is_pen_down = false;
+                sleep(Duration::from_millis(1));
+            }
+
+            // Lift at end of every row
+            if is_pen_down {
+                self.pen_up()?;
+                is_pen_down = false;
+            }
+            sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    /// Draw a bitmap column-first — scanning each column top→bottom.
+    /// This rotates the directional bias 90° so it appears vertically instead of horizontally.
+    pub fn draw_bitmap_col(&mut self, bitmap: &[Vec<bool>], scale: u32) -> Result<()> {
+        let max_x = self.max_x_value() as f32;
+        let max_y = self.max_y_value() as f32;
+        let bmp_w = VIRTUAL_WIDTH as f32 * scale as f32;
+        let bmp_h = VIRTUAL_HEIGHT as f32 * scale as f32;
+
+        if bitmap.is_empty() {
+            return Ok(());
+        }
+        let rows = bitmap.len();
+        let cols = bitmap[0].len();
+
+        for x in 0..cols {
+            let ix = ((x as f32 / bmp_w) * max_x).round() as i32;
+
+            let mut is_pen_down = false;
+            let mut run_start: Option<usize> = None;
+
+            for y in 0..rows {
+                let pixel = bitmap[y][x];
+                let iy = ((y as f32 / bmp_h) * max_y).round() as i32;
+
+                match (pixel, run_start) {
+                    (true, None) => {
+                        run_start = Some(y);
+                        self.pen_down_at((ix, iy))?;
+                        is_pen_down = true;
+                        sleep(Duration::from_millis(1));
+                        self.goto_xy((ix, iy))?;
+                    }
+                    (true, Some(_)) => {
+                        self.goto_xy((ix, iy))?;
+                    }
+                    (false, Some(_)) => {
+                        run_start = None;
+                        self.pen_up()?;
+                        is_pen_down = false;
+                        sleep(Duration::from_millis(1));
+                    }
+                    (false, None) => {}
+                }
+            }
+
+            if is_pen_down {
+                self.pen_up()?;
+                sleep(Duration::from_millis(1));
+            }
+            sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    /// Draw using alpha values as pen pressure for anti-aliased rendering.
+    /// Takes a Vec<Vec<u8>> of alpha values (0-255) and draws each pixel
+    /// with pressure proportional to its alpha value.
+    pub fn draw_bitmap_alpha_pressure(&mut self, alpha_bitmap: &[Vec<u8>], scale: u32) -> Result<()> {
+        let max_x = self.max_x_value() as f32;
+        let max_y = self.max_y_value() as f32;
+        let bmp_w = VIRTUAL_WIDTH as f32 * scale as f32;
+        let bmp_h = VIRTUAL_HEIGHT as f32 * scale as f32;
+
+        for (y, row) in alpha_bitmap.iter().enumerate() {
+            let iy = ((y as f32 / bmp_h) * max_y).round() as i32;
+
+            let mut is_pen_down = false;
+            let mut last_pressure: i32 = 0;
+
+            for (x, &alpha) in row.iter().enumerate() {
+                if alpha <= 15 {
+                    if is_pen_down {
+                        self.pen_up()?;
+                        is_pen_down = false;
+                        sleep(Duration::from_millis(1));
+                    }
+                    continue;
+                }
+
+                let ix = ((x as f32 / bmp_w) * max_x).round() as i32;
+                let pressure = (alpha as f32 / 255.0 * 2630.0).round() as i32;
+
+                if !is_pen_down || pressure != last_pressure {
+                    if is_pen_down {
+                        self.pen_up()?;
+                        sleep(Duration::from_millis(1));
+                    }
+                    self.goto_xy_with_pressure((ix, iy), pressure)?;
+                    is_pen_down = true;
+                    last_pressure = pressure;
+                } else {
+                    self.goto_xy((ix, iy))?;
+                }
+            }
+
+            if is_pen_down {
+                self.pen_up()?;
+                is_pen_down = false;
+            }
+            sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    /// Move to position with a specific pressure value (for alpha-pressure rendering).
+    fn goto_xy_with_pressure(&mut self, (x, y): (i32, i32), pressure: i32) -> Result<()> {
+        if let Some(device) = &mut self.device {
+            // Hover to position first
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 0, x),        // ABS_X
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 1, y),        // ABS_Y
+                InputEvent::new(EvdevEventType::KEY.0, 320, 1),           // BTN_TOOL_PEN
+                InputEvent::new(EvdevEventType::KEY.0, 330, 0),           // BTN_TOUCH (not yet)
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, 0),       // ABS_PRESSURE = 0
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 100),     // ABS_DISTANCE far
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
+            ])?;
+            // Press with given pressure
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::KEY.0, 330, 1),           // BTN_TOUCH
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, pressure), // ABS_PRESSURE
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 0),       // ABS_DISTANCE = 0
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
+            ])?;
         }
         Ok(())
     }

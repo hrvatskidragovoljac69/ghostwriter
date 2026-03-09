@@ -21,7 +21,7 @@ use ghostwriter::{
     simulation::SimulationConfig,
     status::GhostwriterStatus,
     touch::{PenTool, Touch, TriggerCorner},
-    util::{setup_uinput, svg_to_bitmap, write_bitmap_to_file, OptionMap},
+    util::{setup_uinput, svg_to_alpha_bitmap, svg_to_bitmap, write_bitmap_to_file, OptionMap},
     web_server::start_web_server,
 };
 
@@ -203,12 +203,15 @@ fn draw_text(text: &str, keyboard: &mut Keyboard) -> Result<()> {
 fn draw_svg(svg_data: &str, keyboard: &mut Keyboard, pen: &mut Pen, save_bitmap: Option<&String>, no_draw: bool) -> Result<()> {
     info!("Drawing SVG to the screen.");
     keyboard.progress_end()?;
+    let scale = 2u32;
     if let Some(save_bitmap) = save_bitmap {
-        let bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)?;
+        let bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH * scale, VIRTUAL_HEIGHT * scale)?;
         write_bitmap_to_file(&bitmap, save_bitmap)?;
     }
     if !no_draw {
-        pen.draw_svg_centerline(svg_data)?;
+        // Use alpha-to-pressure rendering for best quality: anti-aliased edges via pen pressure
+        let alpha_bitmap = svg_to_alpha_bitmap(svg_data, VIRTUAL_WIDTH * scale, VIRTUAL_HEIGHT * scale)?;
+        pen.draw_bitmap_alpha_pressure(&alpha_bitmap, scale)?;
     }
     Ok(())
 }

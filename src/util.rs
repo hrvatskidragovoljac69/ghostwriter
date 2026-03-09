@@ -34,7 +34,12 @@ pub fn svg_to_bitmap(svg_data: &str, width: u32, height: u32) -> Result<Vec<Vec<
     };
 
     let mut pixmap = Pixmap::new(width, height).unwrap();
-    render(&tree, usvg::Transform::default(), &mut pixmap.as_mut());
+    // Scale transform so the SVG fills the requested bitmap size (not just its intrinsic size)
+    let svg_size = tree.size();
+    let scale_x = width as f32 / svg_size.width();
+    let scale_y = height as f32 / svg_size.height();
+    let transform = usvg::Transform::from_scale(scale_x, scale_y);
+    render(&tree, transform, &mut pixmap.as_mut());
 
     let bitmap = pixmap
         .pixels()
@@ -43,6 +48,74 @@ pub fn svg_to_bitmap(svg_data: &str, width: u32, height: u32) -> Result<Vec<Vec<
         .collect();
 
     Ok(bitmap)
+}
+
+/// Same as svg_to_bitmap but with configurable alpha threshold.
+pub fn svg_to_bitmap_threshold(svg_data: &str, width: u32, height: u32, threshold: u8) -> Result<Vec<Vec<bool>>> {
+    let mut opt = Options::default();
+    let mut fontdb = fontdb::Database::new();
+    fontdb.load_system_fonts();
+    opt.fontdb = Arc::new(fontdb);
+
+    let tree = match Tree::from_str(svg_data, &opt) {
+        Ok(tree) => tree,
+        Err(e) => {
+            info!("Error parsing SVG: {}. Using fallback SVG.", e);
+            let fallback_svg = format!(
+                r#"<svg width='{width}' height='{height}' xmlns='http://www.w3.org/2000/svg'><text x='100' y='900' font-family='Noto Sans' font-size='24'>ERROR!</text></svg>"#
+            );
+            Tree::from_str(&fallback_svg, &opt)?
+        }
+    };
+
+    let mut pixmap = Pixmap::new(width, height).unwrap();
+    let svg_size = tree.size();
+    let scale_x = width as f32 / svg_size.width();
+    let scale_y = height as f32 / svg_size.height();
+    let transform = usvg::Transform::from_scale(scale_x, scale_y);
+    render(&tree, transform, &mut pixmap.as_mut());
+
+    let bitmap = pixmap
+        .pixels()
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|p| p.alpha() > threshold).collect())
+        .collect();
+
+    Ok(bitmap)
+}
+
+/// Same as svg_to_bitmap but returns alpha values (0-255) instead of boolean.
+pub fn svg_to_alpha_bitmap(svg_data: &str, width: u32, height: u32) -> Result<Vec<Vec<u8>>> {
+    let mut opt = Options::default();
+    let mut fontdb = fontdb::Database::new();
+    fontdb.load_system_fonts();
+    opt.fontdb = Arc::new(fontdb);
+
+    let tree = match Tree::from_str(svg_data, &opt) {
+        Ok(tree) => tree,
+        Err(e) => {
+            info!("Error parsing SVG: {}. Using fallback SVG.", e);
+            let fallback_svg = format!(
+                r#"<svg width='{width}' height='{height}' xmlns='http://www.w3.org/2000/svg'><text x='100' y='900' font-family='Noto Sans' font-size='24'>ERROR!</text></svg>"#
+            );
+            Tree::from_str(&fallback_svg, &opt)?
+        }
+    };
+
+    let mut pixmap = Pixmap::new(width, height).unwrap();
+    let svg_size = tree.size();
+    let scale_x = width as f32 / svg_size.width();
+    let scale_y = height as f32 / svg_size.height();
+    let transform = usvg::Transform::from_scale(scale_x, scale_y);
+    render(&tree, transform, &mut pixmap.as_mut());
+
+    let alpha_bitmap = pixmap
+        .pixels()
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|p| p.alpha()).collect())
+        .collect();
+
+    Ok(alpha_bitmap)
 }
 
 pub fn write_bitmap_to_file(bitmap: &[Vec<bool>], filename: &str) -> Result<()> {

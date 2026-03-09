@@ -4,7 +4,7 @@ use evdev::{Device, EventType as EvdevEventType, InputEvent};
 use ghostwriter::pen::Pen;
 use ghostwriter::screenshot::Screenshot;
 use ghostwriter::touch::{PenTool, Touch, TriggerCorner};
-use ghostwriter::util::svg_to_bitmap;
+use ghostwriter::util::{svg_to_alpha_bitmap, svg_to_bitmap, svg_to_bitmap_threshold};
 use std::thread::sleep as std_sleep;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -88,6 +88,18 @@ enum Commands {
     SelectBallpoint,
     /// Read current tool state (for debugging pixel detection)
     ReadToolState,
+    /// Render an SVG string via bidirectional scan (alternating L→R and R→L per row)
+    DrawSvgBidi { svg_string: String },
+    /// Render an SVG string via column-first scan (top→bottom per column)
+    DrawSvgCol { svg_string: String },
+    /// Render an SVG string using alpha-to-pressure mapping for anti-aliased rendering
+    DrawSvgAlphaPressure { svg_string: String },
+    /// Render an SVG string with configurable alpha threshold
+    DrawSvgThreshold { svg_string: String, threshold: u8 },
+    /// Render an SVG string at 3x scale for highest precision
+    DrawSvgScale3x { svg_string: String },
+    /// Render an SVG string with configurable threshold + bidirectional scan
+    DrawSvgThresholdBidi { svg_string: String, threshold: u8 },
 }
 
 #[tokio::main]
@@ -175,10 +187,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::DrawSvg { svg_string } => {
-            let bitmap = svg_to_bitmap(&svg_string, 768, 1024)?;
+            // Render at 2x resolution for sub-pixel accuracy; draw_bitmap_scaled maps back
+            let scale = 2u32;
+            let bitmap = svg_to_bitmap(&svg_string, 768 * scale, 1024 * scale)?;
             with_fineliner(|| {
                 let mut pen = Pen::new(false);
-                pen.draw_bitmap(&bitmap)
+                pen.draw_bitmap_scaled(&bitmap, scale)
             })
             .await?;
             println!("Drew SVG ({} chars)", svg_string.len());
@@ -325,6 +339,72 @@ async fn main() -> Result<()> {
             };
             println!("Tool state: {} | palette_open={} | sidebar_dark={}", tool, palette_open, sidebar_dark);
             println!("  pixel(70,100)={:?}, pixel(2,77)={:?}", palette_pixel, sidebar_pixel);
+        }
+
+        Commands::DrawSvgBidi { svg_string } => {
+            let scale = 2u32;
+            let bitmap = svg_to_bitmap(&svg_string, 768 * scale, 1024 * scale)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_bidi(&bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG bidi ({} chars)", svg_string.len());
+        }
+
+        Commands::DrawSvgCol { svg_string } => {
+            let scale = 2u32;
+            let bitmap = svg_to_bitmap(&svg_string, 768 * scale, 1024 * scale)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_col(&bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG col ({} chars)", svg_string.len());
+        }
+
+        Commands::DrawSvgAlphaPressure { svg_string } => {
+            let scale = 2u32;
+            let alpha_bitmap = svg_to_alpha_bitmap(&svg_string, 768 * scale, 1024 * scale)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_alpha_pressure(&alpha_bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG alpha-pressure ({} chars)", svg_string.len());
+        }
+
+        Commands::DrawSvgThreshold { svg_string, threshold } => {
+            let scale = 2u32;
+            let bitmap = svg_to_bitmap_threshold(&svg_string, 768 * scale, 1024 * scale, threshold)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_scaled(&bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG threshold={} ({} chars)", threshold, svg_string.len());
+        }
+
+        Commands::DrawSvgScale3x { svg_string } => {
+            let scale = 3u32;
+            let bitmap = svg_to_bitmap(&svg_string, 768 * scale, 1024 * scale)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_scaled(&bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG scale3x ({} chars)", svg_string.len());
+        }
+
+        Commands::DrawSvgThresholdBidi { svg_string, threshold } => {
+            let scale = 2u32;
+            let bitmap = svg_to_bitmap_threshold(&svg_string, 768 * scale, 1024 * scale, threshold)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap_bidi(&bitmap, scale)
+            })
+            .await?;
+            println!("Drew SVG threshold-bidi threshold={} ({} chars)", threshold, svg_string.len());
         }
     }
 

@@ -312,8 +312,9 @@ impl Touch {
     /// Settings panel coordinates for the Fineliner pen (slot 2, y≈130).
     /// NOTE: Tapping a pen-type icon closes the settings panel — skip that tap.
     /// Only configure size and color; these taps keep the settings panel open.
+    const SETTINGS_SIZE_THIN: (i32, i32) = (96, 385);      // Thin stroke thickness
     const SETTINGS_SIZE_MEDIUM: (i32, i32) = (150, 385);   // Medium stroke thickness
-    const SETTINGS_COLOR_BLACK: (i32, i32) = (96, 462);    // Black color (row 1, col 1)
+    const SETTINGS_COLOR_BLACK: (i32, i32) = (96, 468);    // Black color (row 1, col 1)
 
     /// Detect whether the palette is currently open by scanning the screenshot.
     ///
@@ -444,8 +445,8 @@ impl Touch {
         self.tap(pen2).await?;
         sleep(Duration::from_millis(100)).await; // Extra delay for settings panel animation
 
-        // Step 5: Configure medium size (skip tip type — tapping it closes the settings panel)
-        self.tap(Self::SETTINGS_SIZE_MEDIUM).await?;
+        // Step 5: Configure thin size (skip tip type — tapping it closes the settings panel)
+        self.tap(Self::SETTINGS_SIZE_THIN).await?;
 
         // Step 6: Configure black color
         self.tap(Self::SETTINGS_COLOR_BLACK).await?;
