@@ -2,6 +2,9 @@ use anyhow::Result;
 use evdev::EventType as EvdevEventType;
 use evdev::{Device, InputEvent};
 use log::info;
+use resvg::usvg;
+use resvg::usvg::{fontdb, Options, Tree};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -47,24 +50,16 @@ impl Pen {
 
         let length = ((x2 as f32 - x1 as f32).powf(2.0) + (y2 as f32 - y1 as f32).powf(2.0)).sqrt();
         // 5.0 is the maximum distance between points
-        // If this is too small
         let steps = (length / 5.0).ceil() as i32;
-        let dx = (x2 - x1) / steps;
-        let dy = (y2 - y1) / steps;
-        // trace!(
-        //     "Drawing from ({}, {}) to ({}, {}) in {} steps",
-        //     x1, y1, x2, y2, steps
-        // );
 
         self.pen_up()?;
-        self.goto_xy((x1, y1))?;
-        self.pen_down()?;
+        self.pen_down_at((x1, y1))?;
 
-        for i in 0..steps {
-            let x = x1 + dx * i;
-            let y = y1 + dy * i;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let x = (x1 as f32 + (x2 - x1) as f32 * t).round() as i32;
+            let y = (y1 as f32 + (y2 - y1) as f32 * t).round() as i32;
             self.goto_xy((x, y))?;
-            // trace!("Drawing to point at ({}, {})", x, y);
         }
 
         self.pen_up()?;
@@ -78,8 +73,7 @@ impl Pen {
             for (x, &pixel) in row.iter().enumerate() {
                 if pixel {
                     if !is_pen_down {
-                        self.goto_xy_virtual((x as i32, y as i32))?;
-                        self.pen_down()?;
+                        self.pen_down_at(self.virtual_to_input((x as i32, y as i32)))?;
                         is_pen_down = true;
                         sleep(Duration::from_millis(1));
                     }
@@ -129,6 +123,32 @@ impl Pen {
         Ok(())
     }
 
+    // Press the pen down at a specific input-space coordinate cleanly:
+    // First hover at the target position (BTN_TOOL_PEN=1, no touch), then press.
+    // This pre-positions the pen so there's no snap artifact from a prior position.
+    pub fn pen_down_at(&mut self, (x, y): (i32, i32)) -> Result<()> {
+        if let Some(device) = &mut self.device {
+            // Hover far: activate tool at target position from far away (no mark)
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 0, x),        // ABS_X
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 1, y),        // ABS_Y
+                InputEvent::new(EvdevEventType::KEY.0, 320, 1),           // BTN_TOOL_PEN
+                InputEvent::new(EvdevEventType::KEY.0, 330, 0),           // BTN_TOUCH (not yet)
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, 0),       // ABS_PRESSURE = 0
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 100),     // ABS_DISTANCE far
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
+            ])?;
+            // Press: touch down at same position
+            device.send_events(&[
+                InputEvent::new(EvdevEventType::KEY.0, 330, 1),           // BTN_TOUCH
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, 2630),    // ABS_PRESSURE (max)
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 0),       // ABS_DISTANCE = 0
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
+            ])?;
+        }
+        Ok(())
+    }
+
     pub fn pen_up(&mut self) -> Result<()> {
         if let Some(device) = &mut self.device {
             device.send_events(&[
@@ -171,6 +191,165 @@ impl Pen {
             DeviceModel::RemarkablePaperPro => 15340,
             DeviceModel::Unknown => 20966, // Default to RM2
         }
+    }
+
+    pub fn virtual_to_input_pub(&self, point: (i32, i32)) -> (i32, i32) {
+        self.virtual_to_input(point)
+    }
+
+    // Draw a single segment from prev to (px,py), emitting interpolated goto_xy events.
+    // Returns updated step_count.
+    fn draw_segment(
+        &mut self,
+        prev: (f32, f32),
+        (px, py): (f32, f32),
+        step_count: &mut usize,
+        max_step: f32,
+    ) -> Result<()> {
+        let dist = ((px - prev.0).powi(2) + (py - prev.1).powi(2)).sqrt();
+        let steps = ((dist / max_step).ceil() as usize).max(1);
+        for s in 1..=steps {
+            let t = s as f32 / steps as f32;
+            let ix = (prev.0 + (px - prev.0) * t).round() as i32;
+            let iy = (prev.1 + (py - prev.1) * t).round() as i32;
+            self.goto_xy_virtual((ix, iy))?;
+            *step_count += 1;
+            if *step_count % 100 == 99 {
+                sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_polylines(&mut self, polylines: &[svg2polylines::Polyline]) -> Result<()> {
+        // Strategy:
+        // - Simple polygons (avg segment length > 10 virtual units): split at sharp corners (≥ 25°)
+        //   for crisp geometric edges. At each corner, overshoot 3 units in the incoming direction
+        //   before lifting to ensure the stroke actually reaches the corner point (prevents gaps).
+        // - Complex paths (short avg segment): text glyphs, circles, curves — draw continuously.
+        //   avg_segment_len distinguishes these: rect/triangle sides are 100-800 units long;
+        //   text glyph segments from svg2polylines at 0.5 tolerance are typically 1-5 units.
+        const MAX_STEP: f32 = 1.0; // virtual units per event
+
+        for polyline in polylines {
+            if polyline.len() < 2 {
+                continue;
+            }
+
+            // Compute average segment length to classify path type
+            let avg_segment_len: f32 = {
+                let mut total = 0.0f32;
+                for i in 1..polyline.len() {
+                    let dx = (polyline[i].x - polyline[i - 1].x) as f32;
+                    let dy = (polyline[i].y - polyline[i - 1].y) as f32;
+                    total += (dx * dx + dy * dy).sqrt();
+                }
+                total / (polyline.len() - 1) as f32
+            };
+
+            // Simple polygons have long segments; text/circles have many short segments.
+            // Simple geometric shapes (line, triangle, rect) have avg_seg > 100 units.
+            // Text glyphs and circles have avg_seg < 20 even at large font sizes.
+            // Use 50.0 as threshold to safely distinguish them.
+            let corner_threshold_deg: f32 = if avg_segment_len > 50.0 { 25.0 } else { 360.0 };
+            info!(
+                "polyline: {} pts, avg_seg={:.1}, threshold={}°",
+                polyline.len(),
+                avg_segment_len,
+                corner_threshold_deg as u32
+            );
+
+            let mut step_count = 0usize;
+            let mut pen_is_down = false;
+            let mut prev = (polyline[0].x as f32, polyline[0].y as f32);
+
+            for i in 0..polyline.len() {
+                let cur = (polyline[i].x as f32, polyline[i].y as f32);
+
+                if !pen_is_down {
+                    let start = self.virtual_to_input((cur.0 as i32, cur.1 as i32));
+                    self.pen_up()?;
+                    sleep(Duration::from_millis(2));
+                    self.pen_down_at(start)?;
+                    sleep(Duration::from_millis(2));
+                    pen_is_down = true;
+                    prev = cur;
+                    continue;
+                }
+
+                // Check for sharp corner at cur (between prev→cur and cur→next).
+                let should_lift = if i + 1 < polyline.len() {
+                    let next = (polyline[i + 1].x as f32, polyline[i + 1].y as f32);
+                    let d_in = (cur.0 - prev.0, cur.1 - prev.1);
+                    let d_out = (next.0 - cur.0, next.1 - cur.1);
+                    let len_in = (d_in.0.powi(2) + d_in.1.powi(2)).sqrt();
+                    let len_out = (d_out.0.powi(2) + d_out.1.powi(2)).sqrt();
+                    if len_in > 0.1 && len_out > 0.1 {
+                        let cos_a = (d_in.0 * d_out.0 + d_in.1 * d_out.1) / (len_in * len_out);
+                        cos_a.clamp(-1.0, 1.0).acos().to_degrees() > corner_threshold_deg
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if should_lift {
+                    // Overshoot 2 units past the corner in the incoming direction to ensure
+                    // the stroke fully reaches the corner before lifting (prevents gaps).
+                    let d_in = (cur.0 - prev.0, cur.1 - prev.1);
+                    let len_in = (d_in.0.powi(2) + d_in.1.powi(2)).sqrt();
+                    let overshoot = if len_in > 0.1 {
+                        let unit = (d_in.0 / len_in, d_in.1 / len_in);
+                        (cur.0 + unit.0 * 3.0, cur.1 + unit.1 * 3.0)
+                    } else {
+                        cur
+                    };
+                    self.draw_segment(prev, overshoot, &mut step_count, MAX_STEP)?;
+                    self.pen_up()?;
+                    sleep(Duration::from_millis(2));
+                    // Re-press at the exact corner (not the overshoot) for a clean start
+                    let start = self.virtual_to_input((cur.0 as i32, cur.1 as i32));
+                    self.pen_down_at(start)?;
+                    sleep(Duration::from_millis(2));
+                } else {
+                    self.draw_segment(prev, cur, &mut step_count, MAX_STEP)?;
+                }
+
+                prev = cur;
+            }
+
+            self.pen_up()?;
+            sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    /// Draw SVG using path tracing via svg2polylines for smooth continuous strokes.
+    /// Text is converted to glyph paths by usvg before tracing.
+    pub fn draw_svg_paths(&mut self, svg_data: &str) -> Result<()> {
+        // Use usvg to parse and flatten text → paths
+        let mut opt = Options::default();
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        opt.fontdb = Arc::new(db);
+        let tree = Tree::from_str(svg_data, &opt)?;
+        let write_opt = usvg::WriteOptions::default(); // preserve_text=false → converts text to paths
+        let flattened_svg = tree.to_string(&write_opt);
+
+        let polylines = svg2polylines::parse(&flattened_svg, 0.5, true)
+            .map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
+        info!("draw_svg_paths: {} polylines", polylines.len());
+        self.draw_polylines(&polylines)
+    }
+
+    /// Draw SVG using path tracing, passing SVG directly to svg2polylines without usvg preprocessing.
+    /// Better for geometric shapes (lines, rects, circles), but text won't render.
+    pub fn draw_svg_paths_raw(&mut self, svg_data: &str) -> Result<()> {
+        let polylines = svg2polylines::parse(svg_data, 0.5, true)
+            .map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
+        info!("draw_svg_paths_raw: {} polylines", polylines.len());
+        self.draw_polylines(&polylines)
     }
 
     fn virtual_to_input(&self, (x, y): (i32, i32)) -> (i32, i32) {

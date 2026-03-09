@@ -7,7 +7,7 @@ use std::io::{Read, Seek};
 use std::process;
 
 use base64::{engine::general_purpose, Engine as _};
-use image::ImageEncoder;
+use image::{GenericImageView, ImageEncoder};
 
 use crate::device::DeviceModel;
 use crate::simulation::{ScreenshotSimulator, SimulationConfig};
@@ -353,5 +353,20 @@ impl Screenshot {
                 Ok(base64_image)
             }
         }
+    }
+
+    /// Return the (r, g, b) pixel value at virtual coordinate (vx, vy) in the 768×1024 space.
+    /// Decodes the stored PNG on each call. Returns None if no screenshot data available.
+    pub fn get_pixel(&self, vx: u32, vy: u32) -> Option<(u8, u8, u8)> {
+        let data = match &self.mode {
+            ScreenshotMode::Real { data, .. } if !data.is_empty() => data,
+            ScreenshotMode::Simulated { simulator } => {
+                return simulator.get_pixel(vx, vy);
+            }
+            _ => return None,
+        };
+        let img = image::load_from_memory(data).ok()?;
+        let pixel = img.get_pixel(vx, vy);
+        Some((pixel[0], pixel[1], pixel[2]))
     }
 }

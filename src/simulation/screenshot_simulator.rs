@@ -83,6 +83,11 @@ impl ScreenshotSimulator {
         Ok(base64_data)
     }
 
+    /// Get pixel at virtual coordinate — always returns white in simulation (no UI chrome).
+    pub fn get_pixel(&self, _vx: u32, _vy: u32) -> Option<(u8, u8, u8)> {
+        Some((255, 255, 255)) // white — palette never open in simulation
+    }
+
     /// Advance to next test image (called manually or automatically)
     pub fn advance_to_next_image(&self) {
         if !self.image_files.is_empty() {

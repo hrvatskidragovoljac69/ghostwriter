@@ -20,7 +20,7 @@ use ghostwriter::{
     pen::Pen,
     simulation::SimulationConfig,
     status::GhostwriterStatus,
-    touch::{Touch, TriggerCorner},
+    touch::{PenTool, Touch, TriggerCorner},
     util::{setup_uinput, svg_to_bitmap, write_bitmap_to_file, OptionMap},
     web_server::start_web_server,
 };
@@ -53,7 +53,7 @@ pub struct Args {
     engine_api_key: Option<String>,
 
     /// Sets the model to use
-    #[arg(long, short, default_value = "claude-sonnet-4-0")]
+    #[arg(long, short, default_value = "claude-sonnet-4-6")]
     model: String,
 
     /// Sets the prompt to use
@@ -203,12 +203,12 @@ fn draw_text(text: &str, keyboard: &mut Keyboard) -> Result<()> {
 fn draw_svg(svg_data: &str, keyboard: &mut Keyboard, pen: &mut Pen, save_bitmap: Option<&String>, no_draw: bool) -> Result<()> {
     info!("Drawing SVG to the screen.");
     keyboard.progress_end()?;
-    let bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)?;
     if let Some(save_bitmap) = save_bitmap {
+        let bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH, VIRTUAL_HEIGHT)?;
         write_bitmap_to_file(&bitmap, save_bitmap)?;
     }
     if !no_draw {
-        pen.draw_bitmap(&bitmap)?;
+        pen.draw_svg_paths(svg_data)?;
     }
     Ok(())
 }
@@ -411,7 +411,7 @@ async fn run_ghostwriter_loop(
     let mut engine = create_engine(&engine_name, &engine_options)?;
 
     // Register tools
-    register_tools(&mut engine, Arc::clone(&keyboard), Arc::clone(&pen), &config)?;
+    register_tools(&mut engine, Arc::clone(&keyboard), Arc::clone(&pen), Arc::clone(&touch), &config)?;
 
     let engine = Arc::new(TokioMutex::new(engine));
 
@@ -556,7 +556,7 @@ async fn run_ghostwriter_loop(
 }
 
 // Helper function to register tools with the engine
-fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, config: &Config) -> Result<()> {
+fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, touch: Arc<TokioRwLock<Touch>>, config: &Config) -> Result<()> {
     use serde_json::Value as json;
 
     // Register draw_text tool
@@ -596,6 +596,8 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
         let no_draw = config.no_draw;
         let keyboard_clone = Arc::clone(&keyboard);
         let pen_clone = Arc::clone(&pen);
+        let touch_clone = Arc::clone(&touch);
+        let test_mode = config.is_test_mode();
 
         let tool_config_draw_svg = load_config("tool_draw_svg.json");
         engine.register_tool(
@@ -614,10 +616,33 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
                         log::error!("Failed to write output file: {}", e);
                     }
                 }
+
+                // Switch to fineliner before drawing, remember original tool for restore
+                let previous_tool = if !no_draw && !test_mode {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            touch_clone.write().await.select_fineliner().await
+                        })
+                    }).unwrap_or(PenTool::Unknown)
+                } else {
+                    PenTool::Unknown
+                };
+
                 let mut keyboard = lock!(keyboard_clone);
                 let mut pen = lock!(pen_clone);
                 if let Err(e) = draw_svg(svg_data, &mut keyboard, &mut pen, save_bitmap.as_ref(), no_draw) {
                     log::error!("Failed to draw SVG: {}", e);
+                }
+                drop(keyboard);
+                drop(pen);
+
+                // Restore the original tool after drawing
+                if !no_draw && !test_mode && previous_tool != PenTool::Unknown {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            touch_clone.write().await.restore_tool(previous_tool).await
+                        })
+                    }).ok();
                 }
             }),
         );

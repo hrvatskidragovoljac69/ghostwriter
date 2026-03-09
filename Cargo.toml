@@ -18,7 +18,8 @@ image = "0.25.5"
 byteorder = "1.4"
 clap = { version = "4.0", features = ["derive"] }
 evdev = { version = "0.13", features = ["tokio"] }
-resvg = "0.45"
+resvg = "0.47"
+svg2polylines = "0.8"
 dotenv = "0.15"
 imageproc = "0.25.0"
 rust-embed = { version = "8.5.0", features = ["include-exclude", "compression"] }
@@ -38,6 +39,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "ghostwriter"
 path = "src/main.rs"
+
+[[bin]]
+name = "experiment"
+path = "src/bin/experiment.rs"
 
 [profile.release]
 # strip = true  # Automatically strip symbols from the binary.

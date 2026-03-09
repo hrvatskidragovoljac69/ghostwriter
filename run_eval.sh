@@ -11,22 +11,36 @@ results="$outdir_base/results.md"
 
 scenarios=($(ls evaluations))
 
-attempt_count=3
+attempt_count=1 # Usually 3
 
 declare -A test_case_params
 
-test_case_params["claude_sonnet_latest_no_seg"]="--model claude-3-5-sonnet-latest"
-test_case_params["claude_sonnet_latest_with_seg"]="--apply-segmentation --model claude-3-5-sonnet-latest"
-test_case_params["gpt-4o-mini_no_seg"]="--model gpt-4o-mini"
-test_case_params["gpt-4o_with_seg"]="--apply-segmentation --model gpt-4o-mini"
-test_case_params["gpt-4o-mini_no_seg"]="--model gpt-4o"
-test_case_params["gpt-4o_with_seg"]="--apply-segmentation --model gpt-4o"
-test_case_params["gemini-2-flash_no_seg"]="--model gemini-2.0-flash-exp"
-test_case_params["gemini-2-flash_with_seg"]="--apply-segmentation --model gemini-2.0-flash-exp"
+test_case_params["claude_haiku_4.5"]="--model claude-haiku-4-5"
+test_case_params["claude_sonnet_4.5"]="--model claude-sonnet-4-5"
+test_case_params["claude_opus_4.6"]="--model claude-opus-4-6"
+
+test_case_params["gemini-3-flash"]="--model gemini-3-flash-preview"
+test_case_params["gemini-3-pro"]="--model gemini-3-pro-preview"
+
+test_case_params["gpt-5-nano"]="--model gpt-5-nano"
+test_case_params["gpt-5-mini"]="--model gpt-5-mini"
+test_case_params["gpt-5.2"]="--model gpt-5.2"
+# test_case_params["gpt-5.2-codex"]="--model gpt-5.2-codex"
+
+
+# Old retired test cases
+# test_case_params["claude_sonnet_latest_no_seg"]="--model claude-3-5-sonnet-latest"
+# test_case_params["claude_sonnet_latest_with_seg"]="--apply-segmentation --model claude-3-5-sonnet-latest"
+# test_case_params["gpt-4o-mini_no_seg"]="--model gpt-4o-mini"
+# test_case_params["gpt-4o_with_seg"]="--apply-segmentation --model gpt-4o-mini"
+# test_case_params["gpt-4o-mini_no_seg"]="--model gpt-4o"
+# test_case_params["gpt-4o_with_seg"]="--apply-segmentation --model gpt-4o"
+# test_case_params["gemini-2-flash_no_seg"]="--model gemini-2.0-flash-exp"
+# test_case_params["gemini-2-flash_with_seg"]="--apply-segmentation --model gemini-2.0-flash-exp"
 # test_case_params["gemini-1206-flash_no_seg"]="--model gemini-exp-1206"
 # test_case_params["gemini-1206-flash_with_seg"]="--apply-segmentation --model gemini-exp-1206"
-test_case_params["gemini-1.5-pro_no_seg"]="--model gemini-1.5-pro"
-test_case_params["gemini-1.5-pro_with_seg"]="--apply-segmentation --model gemini-1.5-pro"
+# test_case_params["gemini-1.5-pro_no_seg"]="--model gemini-1.5-pro"
+# test_case_params["gemini-1.5-pro_with_seg"]="--apply-segmentation --model gemini-1.5-pro"
 
 echo "# Ghostwriter evaluation results $datetime" > $results
 echo "" >> $results
@@ -61,6 +75,8 @@ for scenario in "${scenarios[@]}"; do
       # Run the test case
       echo "Running scenario $scenario with params $params attempt $attempt"
 
+      start_time=$(date +%s%N)
+
       ./target/release/ghostwriter \
         --input-png evaluations/$scenario/input.png \
         --save-screenshot $outdir/input.png \
@@ -72,6 +88,10 @@ for scenario in "${scenarios[@]}"; do
         --no-loop \
         --no-trigger \
         $params
+
+      end_time=$(date +%s%N)
+      elapsed_ms=$(( (end_time - start_time) / 1000000 ))
+      elapsed_s=$(printf "%.1f" "$(echo "$elapsed_ms / 1000" | bc -l)")
 
       # Create a merged image with the new part in red
       if [ -f $outdir/result.png ]; then
@@ -94,8 +114,11 @@ for scenario in "${scenarios[@]}"; do
         echo '```' >> $results
       fi
 
-      echo "Sleeping for 10 seconds to avoid rate limiting"
-      sleep 10
+      echo " (${elapsed_s}s)" >> $results
+
+      echo "Completed in ${elapsed_s}s"
+      # echo "Sleeping for 10 seconds to avoid rate limiting"
+      # sleep 10
 
     done
 
