@@ -208,7 +208,7 @@ fn draw_svg(svg_data: &str, keyboard: &mut Keyboard, pen: &mut Pen, save_bitmap:
         write_bitmap_to_file(&bitmap, save_bitmap)?;
     }
     if !no_draw {
-        pen.draw_svg_paths(svg_data)?;
+        pen.draw_svg_centerline(svg_data)?;
     }
     Ok(())
 }
@@ -556,7 +556,7 @@ async fn run_ghostwriter_loop(
 }
 
 // Helper function to register tools with the engine
-fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, touch: Arc<TokioRwLock<Touch>>, config: &Config) -> Result<()> {
+fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, _touch: Arc<TokioRwLock<Touch>>, config: &Config) -> Result<()> {
     use serde_json::Value as json;
 
     // Register draw_text tool
@@ -596,7 +596,6 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
         let no_draw = config.no_draw;
         let keyboard_clone = Arc::clone(&keyboard);
         let pen_clone = Arc::clone(&pen);
-        let touch_clone = Arc::clone(&touch);
         let test_mode = config.is_test_mode();
 
         let tool_config_draw_svg = load_config("tool_draw_svg.json");
@@ -618,10 +617,12 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
                 }
 
                 // Switch to fineliner before drawing, remember original tool for restore
+                // Use a fresh Touch instance to avoid deadlock with trigger_task which
+                // holds the shared touch RwLock indefinitely while waiting for user trigger
                 let previous_tool = if !no_draw && !test_mode {
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            touch_clone.write().await.select_fineliner().await
+                            Touch::new(false, TriggerCorner::UpperRight).select_fineliner().await
                         })
                     }).unwrap_or(PenTool::Unknown)
                 } else {
@@ -640,7 +641,7 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
                 if !no_draw && !test_mode && previous_tool != PenTool::Unknown {
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            touch_clone.write().await.restore_tool(previous_tool).await
+                            Touch::new(false, TriggerCorner::UpperRight).restore_tool(previous_tool).await
                         })
                     }).ok();
                 }

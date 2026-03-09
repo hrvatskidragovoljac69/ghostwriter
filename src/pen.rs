@@ -343,6 +343,70 @@ impl Pen {
         self.draw_polylines(&polylines)
     }
 
+    /// Draw paths given as lists of (x, y) virtual coordinates.
+    /// No corner detection — skeleton paths are already single-pixel-wide and smooth.
+    fn draw_virtual_paths(&mut self, paths: &[Vec<(f32, f32)>]) -> Result<()> {
+        const MAX_STEP: f32 = 1.0;
+        let mut step_count = 0usize;
+
+        for path in paths {
+            if path.len() < 2 {
+                continue;
+            }
+
+            let start = self.virtual_to_input((path[0].0 as i32, path[0].1 as i32));
+            self.pen_up()?;
+            sleep(Duration::from_millis(2));
+            self.pen_down_at(start)?;
+            sleep(Duration::from_millis(2));
+
+            let mut prev = path[0];
+            for &pt in &path[1..] {
+                self.draw_segment(prev, pt, &mut step_count, MAX_STEP)?;
+                prev = pt;
+            }
+
+            self.pen_up()?;
+            sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    /// Draw SVG by rasterizing to a bitmap, thinning to a 1-pixel skeleton,
+    /// then tracing the skeleton to pen strokes.  Produces single-stroke centerlines
+    /// for text and shapes without needing to "fill" outlines.
+    pub fn draw_svg_centerline(&mut self, svg_data: &str) -> Result<()> {
+        use crate::skeleton;
+        use crate::util::svg_to_bitmap;
+
+        // Rasterize at 2× for better thinning quality, then scale coords back
+        let scale = 2u32;
+        let mut bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH * scale, VIRTUAL_HEIGHT * scale)?;
+        info!(
+            "draw_svg_centerline: rasterized {}×{} bitmap",
+            VIRTUAL_WIDTH * scale,
+            VIRTUAL_HEIGHT * scale
+        );
+
+        skeleton::thin_zhang_suen(&mut bitmap);
+        info!("draw_svg_centerline: thinning done");
+
+        let raw_paths = skeleton::trace_skeleton(&bitmap);
+        info!("draw_svg_centerline: {} skeleton paths", raw_paths.len());
+
+        // Scale from 2× pixel space back to virtual 768×1024 and smooth out staircase artifacts
+        let inv = 1.0 / scale as f32;
+        let paths: Vec<Vec<(f32, f32)>> = raw_paths
+            .iter()
+            .map(|p| {
+                let scaled: Vec<(f32, f32)> = p.iter().map(|&(x, y)| (x * inv, y * inv)).collect();
+                skeleton::smooth_path(&scaled, 5)
+            })
+            .collect();
+
+        self.draw_virtual_paths(&paths)
+    }
+
     /// Draw SVG using path tracing, passing SVG directly to svg2polylines without usvg preprocessing.
     /// Better for geometric shapes (lines, rects, circles), but text won't render.
     pub fn draw_svg_paths_raw(&mut self, svg_data: &str) -> Result<()> {

@@ -60,6 +60,10 @@ enum Commands {
     DrawCircle { cx: i32, cy: i32, r: i32 },
     /// Render an SVG string via bitmap to pen strokes
     DrawSvg { svg_string: String },
+    /// Render an SVG string via skeleton centerline (single-stroke, no fill needed)
+    DrawSvgCenterline { svg_string: String },
+    /// Draw text at given font size and y position using skeleton centerline rendering
+    DrawText { text: String, font_size: u32, y: Option<u32> },
     /// Render an SVG string via path tracing (smooth strokes, handles text via glyph paths)
     DrawSvgPaths { svg_string: String },
     /// Render SVG via path tracing, bypassing usvg (better for geometric shapes, no text)
@@ -100,87 +104,136 @@ async fn main() -> Result<()> {
         }
 
         Commands::DrawLine { x1, y1, x2, y2 } => {
-            let mut pen = Pen::new(false);
-            pen.draw_line_screen((x1, y1), (x2, y2))?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_line_screen((x1, y1), (x2, y2))
+            })
+            .await?;
             println!("Drew line from ({}, {}) to ({}, {})", x1, y1, x2, y2);
         }
 
         Commands::DrawDot { x, y } => {
-            let mut pen = Pen::new(false);
-            pen.pen_up()?;
-            pen.goto_xy_virtual((x, y))?;
-            pen.pen_down()?;
-            for n in 0..3 {
-                pen.goto_xy_virtual((x + n, y + n))?;
-            }
-            pen.goto_xy_virtual((x, y))?;
-            pen.pen_up()?;
-            std_sleep(Duration::from_millis(5));
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.pen_up()?;
+                pen.goto_xy_virtual((x, y))?;
+                pen.pen_down()?;
+                for n in 0..3 {
+                    pen.goto_xy_virtual((x + n, y + n))?;
+                }
+                pen.goto_xy_virtual((x, y))?;
+                pen.pen_up()?;
+                std_sleep(Duration::from_millis(5));
+                Ok(())
+            })
+            .await?;
             println!("Drew dot at ({}, {})", x, y);
         }
 
         Commands::DrawRect { x1, y1, x2, y2 } => {
-            let mut pen = Pen::new(false);
-            pen.draw_line_screen((x1, y1), (x2, y1))?; // top
-            pen.draw_line_screen((x2, y1), (x2, y2))?; // right
-            pen.draw_line_screen((x2, y2), (x1, y2))?; // bottom
-            pen.draw_line_screen((x1, y2), (x1, y1))?; // left
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_line_screen((x1, y1), (x2, y1))?; // top
+                pen.draw_line_screen((x2, y1), (x2, y2))?; // right
+                pen.draw_line_screen((x2, y2), (x1, y2))?; // bottom
+                pen.draw_line_screen((x1, y2), (x1, y1))   // left
+            })
+            .await?;
             println!("Drew rect ({}, {}) to ({}, {})", x1, y1, x2, y2);
         }
 
         Commands::DrawTriangle { x1, y1, x2, y2, x3, y3 } => {
-            let mut pen = Pen::new(false);
-            pen.draw_line_screen((x1, y1), (x2, y2))?;
-            pen.draw_line_screen((x2, y2), (x3, y3))?;
-            pen.draw_line_screen((x3, y3), (x1, y1))?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_line_screen((x1, y1), (x2, y2))?;
+                pen.draw_line_screen((x2, y2), (x3, y3))?;
+                pen.draw_line_screen((x3, y3), (x1, y1))
+            })
+            .await?;
             println!("Drew triangle ({},{}) ({},{}) ({},{})", x1, y1, x2, y2, x3, y3);
         }
 
         Commands::DrawCircle { cx, cy, r } => {
-            let mut pen = Pen::new(false);
-            // Sample circle perimeter at ~5 input-unit intervals for smooth continuous stroke
-            let circumference = 2.0 * std::f32::consts::PI * r as f32;
-            let steps = (circumference / 3.0).ceil() as usize;
-            pen.pen_up()?;
-            // Press down at start point (rightmost = angle 0) in one atomic event
-            let x0 = cx + r;
-            let y0 = cy;
-            pen.pen_down_at(pen.virtual_to_input_pub((x0, y0)))?;
-            for i in 0..=steps {
-                let angle = 2.0 * std::f32::consts::PI * i as f32 / steps as f32;
-                let x = (cx as f32 + r as f32 * angle.cos()).round() as i32;
-                let y = (cy as f32 + r as f32 * angle.sin()).round() as i32;
-                pen.goto_xy_virtual((x, y))?;
-            }
-            pen.pen_up()?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                let circumference = 2.0 * std::f32::consts::PI * r as f32;
+                let steps = (circumference / 3.0).ceil() as usize;
+                pen.pen_up()?;
+                let x0 = cx + r;
+                let y0 = cy;
+                pen.pen_down_at(pen.virtual_to_input_pub((x0, y0)))?;
+                for i in 0..=steps {
+                    let angle = 2.0 * std::f32::consts::PI * i as f32 / steps as f32;
+                    let x = (cx as f32 + r as f32 * angle.cos()).round() as i32;
+                    let y = (cy as f32 + r as f32 * angle.sin()).round() as i32;
+                    pen.goto_xy_virtual((x, y))?;
+                }
+                pen.pen_up()
+            })
+            .await?;
             println!("Drew circle at ({}, {}) r={}", cx, cy, r);
         }
 
         Commands::DrawSvg { svg_string } => {
             let bitmap = svg_to_bitmap(&svg_string, 768, 1024)?;
-            let mut pen = Pen::new(false);
-            pen.draw_bitmap(&bitmap)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap(&bitmap)
+            })
+            .await?;
             println!("Drew SVG ({} chars)", svg_string.len());
         }
 
+        Commands::DrawSvgCenterline { svg_string } => {
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_svg_centerline(&svg_string)
+            })
+            .await?;
+            println!("Drew SVG centerline ({} chars)", svg_string.len());
+        }
+
+        Commands::DrawText { text, font_size, y } => {
+            let y = y.unwrap_or_else(|| 200u32.max(font_size + 150));
+            let svg_string = format!(
+                r#"<svg width="768" height="1024" xmlns="http://www.w3.org/2000/svg"><text x="80" y="{}" font-family="sans-serif" font-size="{}" fill="black">{}</text></svg>"#,
+                y, font_size, text
+            );
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_svg_centerline(&svg_string)
+            })
+            .await?;
+            println!("Drew text '{}' at font-size {} (y={})", text, font_size, y);
+        }
+
         Commands::DrawSvgPaths { svg_string } => {
-            let mut pen = Pen::new(false);
-            pen.draw_svg_paths(&svg_string)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_svg_paths(&svg_string)
+            })
+            .await?;
             println!("Drew SVG paths ({} chars)", svg_string.len());
         }
 
         Commands::DrawSvgPathsRaw { svg_string } => {
-            let mut pen = Pen::new(false);
-            pen.draw_svg_paths_raw(&svg_string)?;
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_svg_paths_raw(&svg_string)
+            })
+            .await?;
             println!("Drew SVG paths raw ({} chars)", svg_string.len());
         }
 
         Commands::DrawPng { png_path } => {
             let img = image::open(&png_path)?.to_luma8();
-            // Dark pixels (< 128) are treated as ink
-            let bitmap: Vec<Vec<bool>> = img.rows().map(|row| row.map(|p| p[0] < 128).collect()).collect();
-            let mut pen = Pen::new(false);
-            pen.draw_bitmap(&bitmap)?;
+            let bitmap: Vec<Vec<bool>> =
+                img.rows().map(|row| row.map(|p| p[0] < 128).collect()).collect();
+            with_fineliner(|| {
+                let mut pen = Pen::new(false);
+                pen.draw_bitmap(&bitmap)
+            })
+            .await?;
             println!("Drew PNG from {}", png_path);
         }
 
@@ -276,6 +329,16 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Switch to fineliner (with correct size/color settings), run drawing closure, then restore.
+async fn with_fineliner<F: FnOnce() -> Result<()>>(f: F) -> Result<()> {
+    let mut touch = Touch::new(false, TriggerCorner::UpperRight);
+    let previous = touch.select_fineliner().await?;
+    sleep(Duration::from_millis(500)).await; // Wait for palette close animation to finish
+    let result = f();
+    touch.restore_tool(previous).await?;
+    result
 }
 
 async fn two_finger_tap(x: i32, y: i32) -> Result<()> {

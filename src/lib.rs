@@ -1,4 +1,5 @@
 pub mod cancellation;
+pub mod skeleton;
 pub mod config;
 pub mod coordinator;
 pub mod device;
