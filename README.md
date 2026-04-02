@@ -137,7 +137,7 @@ When I want to do a build for others, I tag main with like `v2026.09.21-01` and 
   * I got a rudimentary gesture and status display!
   * So now you can touch in the upper-right and you get an "X" drawn. Then as the input is processed you get further crosses through the X. You have to erase it yourself though :)
 * **2024-10-10** - Initial virtual keyboard setup
-  * I've started to learn about using the Remarkable with a keyboard, something that I hadn't done before. It's surprisingly limited ... there is basicaly one large textarea for each page with some very basic formatting
+  * I've started to learn about using the Remarkable with a keyboard, something that I hadn't done before. It's surprisingly limited ... there is basically one large textarea for each page with some very basic formatting
   * To write in that I have to make a pretend keyboard, which we can do via rM-input-devices, and I've done basic validation that it works!
   * So now I want to introduce a mode where it always writes back to the text layer and recognizes that text comes from Machine and hadwriting from Human. Not sure that I'll like this mode
 * **2024-10-20** - Text output and other modes
@@ -147,7 +147,7 @@ When I want to do a build for others, I tag main with like `v2026.09.21-01` and 
   * Got a github action all set to do binary builds
 * **2024-10-23** - Code shuffle
   * Doing a bit of refactoring, grouping utilities into separate files
-  * Yesterday a new Anthropic model came out (3.5-sonnet-new) which might be better at spacial awareness on the screen, so next up is to try that out in drawing-mode
+  * Yesterday a new Anthropic model came out (3.5-sonnet-new) which might be better at spatial awareness on the screen, so next up is to try that out in drawing-mode
   * In any case, next I want to set it up with `tools` so that it can contextually give back an SVG or text or start to trigger external scripts, like for TODO list management
 * **2024-11-02** - Tool Time
   * Switch to providing some tools -- draw_text and draw_svg
@@ -157,8 +157,8 @@ When I want to do a build for others, I tag main with like `v2026.09.21-01` and 
   * More shuffling to start to isolate the API
   * ... and now I added Claude/Anthropic!
   * It is able to use an almost identical tool-use setup, so I should be able to merge the two
-  * So far it seems to like drawing a bit more, but it is not great at drawing and not much better at spacial awareness
-  * Maybe next on the queue will be augmenting spacial awareness through some image pre-processing and result positioning. Like detect bounding boxes, segments, etc, feed that into the model, and have the model return an array of svgs and where they should be positioned. Maybe.
+  * So far it seems to like drawing a bit more, but it is not great at drawing and not much better at spatial awareness
+  * Maybe next on the queue will be augmenting spatial awareness through some image pre-processing and result positioning. Like detect bounding boxes, segments, etc, feed that into the model, and have the model return an array of svgs and where they should be positioned. Maybe.
 * **2024-11-22** - Manual Evaluations
   * Starting to sketch out how an evaluation might work
   * First I've added a bunch of parameters for recording input/output
@@ -204,7 +204,7 @@ When I want to do a build for others, I tag main with like `v2026.09.21-01` and 
   * Right now it is a hard-wired set of parameters which basically turn on/off segmentation and use either Claude 3.5 Sonnet or ChatGPT 4o-mini
   * See [the initial evaluation report](evaluation_results/2024-12-21_13-57-31/results.md)!
   * I think markdown doesn't let me lay this out how I want, so will probably switch to html (maybe turn on github site hosting for it)
-  * This is starting to get into the terratory where it can take some time and money to execute ... running this a bunch of times and I sent like $1. Not sure how long it took. but there were 48 executions in this final report
+  * This is starting to get into the territory where it can take some time and money to execute ... running this a bunch of times and I sent like $1. Not sure how long it took. but there were 48 executions in this final report
   * Oh -- I think it's rather important to run each set a few times assuming there is some temperature involved
   * To scale this even further we of course would want to bring in a JUDGE-BOT!
   * Then I could say things like "my new segmentation algorithm improved output quality by 17% per the JUDGE-BOT" etc
