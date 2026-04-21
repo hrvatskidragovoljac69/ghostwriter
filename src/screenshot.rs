@@ -71,10 +71,42 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::Remarkable2 => 2,
+            DeviceModel::Remarkable2 => Self::detect_rm2_bytes_per_pixel(),
             DeviceModel::RemarkablePaperPro => 4,
             DeviceModel::Unknown => 2, // Default to RM2
         }
+    }
+
+    // Returns (major, minor) firmware version from /etc/os-release IMG_VERSION field.
+    fn detect_rm2_firmware_version() -> (u32, u32) {
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            for line in content.lines() {
+                if line.starts_with("IMG_VERSION=") {
+                    let value = line.trim_start_matches("IMG_VERSION=").trim_matches('"');
+                    let parts: Vec<&str> = value.split('.').collect();
+                    if parts.len() >= 2 {
+                        let major = parts[0].parse::<u32>().unwrap_or(0);
+                        let minor = parts[1].parse::<u32>().unwrap_or(0);
+                        debug!("RM2 firmware version: {}.{}", major, minor);
+                        return (major, minor);
+                    }
+                }
+            }
+        }
+        (0, 0)
+    }
+
+    // Firmware 3.24+ changed RM2 framebuffer from 16-bit (2 bpp) to 32-bit BGRA (4 bpp).
+    fn detect_rm2_bytes_per_pixel() -> usize {
+        let (major, minor) = Self::detect_rm2_firmware_version();
+        if major > 3 || (major == 3 && minor >= 24) { 4 } else { 2 }
+    }
+
+    // Memory offset within the post-fb0 mapping where the current framebuffer data starts.
+    // Reference: goMarkableStream internal/remarkable/detect.go
+    fn detect_rm2_pointer_offset() -> u64 {
+        let (major, minor) = Self::detect_rm2_firmware_version();
+        if major > 3 || (major == 3 && minor >= 24) { 2629632 } else { 0 }
     }
 
     pub fn take_screenshot(&mut self) -> Result<()> {
@@ -138,14 +170,17 @@ impl Screenshot {
                 Ok(frame_pointer)
             }
             _ => {
-                // Original RM2 approach
+                // RM2: find the mapping after /dev/fb0 in /proc/pid/maps, then apply firmware offset.
+                // Reference: goMarkableStream internal/remarkable/pointer.go
                 let output = process::Command::new("sh")
                     .arg("-c")
-                    .arg(format!("grep -C1 '/dev/fb0' /proc/{}/maps | tail -n1 | sed 's/-.*$//'", pid))
+                    .arg(format!("grep -A1 '/dev/fb0' /proc/{}/maps | tail -n1 | sed 's/-.*$//'", pid))
                     .output()?;
                 let address_hex = String::from_utf8(output.stdout)?.trim().to_string();
                 let address = u64::from_str_radix(&address_hex, 16)?;
-                Ok(address + 7)
+                let pointer_offset = Self::detect_rm2_pointer_offset();
+                debug!("RM2 framebuffer: base={:#x}, pointer_offset={}, total={:#x}", address, pointer_offset, address + pointer_offset + 8);
+                Ok(address + pointer_offset + 8)
             }
         }
     }
@@ -276,33 +311,30 @@ impl Screenshot {
                 self.encode_png_rmpp(raw_data)
             }
             _ => {
-                // RM2 uses 16-bit grayscale
+                // RM2: 16-bit pre-3.24, 32-bit RGB32 on 3.24+
                 self.encode_png_rm2(raw_data)
             }
         }
     }
     fn encode_png_rm2(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
-        let raw_u8: Vec<u8> = raw_data.chunks_exact(2).map(|chunk| u8::from_le_bytes([chunk[1]])).collect();
-        let width = self.screen_width();
-        let height = self.screen_height();
-        // let mut processed = vec![0u8; (width * height) as usize];
-        let processed: Vec<u8> = raw_u8.iter().map(|&value| Self::apply_curves(value)).collect();
-
-        // for y in 0..height {
-        //     for x in 0..width {
-        //         let src_idx = (height - 1 - y) + (width - 1 - x) * height;
-        //         let dst_idx = y * width + x;
-        //         processed[dst_idx as usize] = Self::apply_curves(raw_u8[src_idx as usize]);
-
-        //     }
-        // }
-
-        let img = GrayImage::from_raw(width, height, processed).ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
-        let rotated_img = image::imageops::rotate270(&img);
-        let final_image = image::imageops::flip_horizontal(&rotated_img);
+        let bpp = self.bytes_per_pixel();
         let mut png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
-        encoder.write_image(final_image.as_raw(), final_image.width(), final_image.height(), image::ExtendedColorType::L8)?;
+
+        if bpp == 4 {
+            // Firmware 3.24+: data is stored portrait (1404×1872), 32-bit BGRA.
+            // Values are already full 8-bit range — don't apply the old aggressive curve.
+            let processed: Vec<u8> = raw_data.chunks_exact(4).map(|chunk| chunk[0]).collect();
+            let img = GrayImage::from_raw(1404, 1872, processed).ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
+            encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)?;
+        } else {
+            // Pre-3.24: data is stored landscape (1872×1404), 16-bit RGB565. Take high byte.
+            let processed: Vec<u8> = raw_data.chunks_exact(2).map(|chunk| Self::apply_curves(chunk[1])).collect();
+            let img = GrayImage::from_raw(self.screen_width(), self.screen_height(), processed).ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
+            let rotated_img = image::imageops::rotate270(&img);
+            let final_image = image::imageops::flip_horizontal(&rotated_img);
+            encoder.write_image(final_image.as_raw(), final_image.width(), final_image.height(), image::ExtendedColorType::L8)?;
+        }
 
         Ok(png_data)
     }
