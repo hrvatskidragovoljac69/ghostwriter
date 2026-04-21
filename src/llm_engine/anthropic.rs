@@ -1,15 +1,10 @@
-use super::LLMEngine;
+use super::{status_update, LLMEngine, Tool};
+use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
 use log::debug;
 use serde_json::json;
 use serde_json::Value as json;
-
-pub struct Tool {
-    name: String,
-    definition: json,
-    callback: Option<Box<dyn FnMut(json)>>,
-}
 
 pub struct Anthropic {
     model: String,
@@ -27,7 +22,7 @@ impl Anthropic {
         self.content.push(content);
     }
 
-    fn anthropic_tool_definition(tool: &Tool) -> json {
+    fn tool_definition_json(tool: &Tool) -> json {
         json!({
             "name": tool.definition["name"],
             "description": tool.definition["description"],
@@ -36,6 +31,7 @@ impl Anthropic {
     }
 }
 
+#[async_trait::async_trait]
 impl LLMEngine for Anthropic {
     fn new(options: &OptionMap) -> Self {
         let api_key = option_or_env(options, "api_key", "ANTHROPIC_API_KEY");
@@ -57,7 +53,7 @@ impl LLMEngine for Anthropic {
         }
     }
 
-    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json)>) {
+    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json) + Send>) {
         self.tools.push(Tool {
             name: name.to_string(),
             definition,
@@ -87,8 +83,11 @@ impl LLMEngine for Anthropic {
         self.content.clear();
     }
 
-    fn execute(&mut self) -> Result<()> {
-        let mut tool_definitions = self.tools.iter().map(Self::anthropic_tool_definition).collect::<Vec<_>>();
+    async fn execute(&mut self, cancellation: &GhostwriterCancellation, mut status_callback: Option<super::StatusCallback>) -> Result<()> {
+        // Notify that we're building context
+        // status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
+
+        let mut tool_definitions = self.tools.iter().map(Self::tool_definition_json).collect::<Vec<_>>();
 
         // Add web search tool if enabled
         if self.web_search {
@@ -123,24 +122,36 @@ impl LLMEngine for Anthropic {
 
         debug!("Request: {}", body);
 
-        let raw_response = ureq::post(&format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", self.api_key.as_str())
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .send_json(&body);
+        // Notify that we're processing with LLM
+        status_update!(status_callback, super::ModelExecutionStatus::LlmProcessing);
 
-        let mut response = match raw_response {
-            Ok(response) => response,
-            Err(err) => {
-                debug!("API Error: {}", err);
-                return Err(anyhow::anyhow!("API ERROR: {}", err));
+        // Create async HTTP request with cancellation support
+        let request_future = async {
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!("{}/v1/messages", self.base_url))
+                .header("x-api-key", self.api_key.as_str())
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!("API Error: {}", response.status()));
             }
+
+            let body_text = response.text().await?;
+            let json: json = serde_json::from_str(&body_text)?;
+            Ok(json)
         };
 
-        // Read response body as string
-        let body_text = response.body_mut().read_to_string().unwrap();
-        let json: json = serde_json::from_str(&body_text).unwrap();
+        let json: json = with_cancellation(request_future, cancellation).await?;
         debug!("Response: {}", json);
+
+        // Notify that we're processing the response
+        status_update!(status_callback, super::ModelExecutionStatus::ProcessingResponse);
+
         let content_array = &json["content"];
 
         // Loop through all content entries
@@ -149,6 +160,8 @@ impl LLMEngine for Anthropic {
 
             match content_type {
                 "tool_use" => {
+                    // Notify that we're calling tools
+                    status_update!(status_callback, super::ModelExecutionStatus::CallingTools);
                     let function_name = content_item["name"].as_str().unwrap();
                     let function_input = &content_item["input"];
                     let tool = self.tools.iter_mut().find(|tool| tool.name == function_name);
@@ -156,11 +169,18 @@ impl LLMEngine for Anthropic {
                     if let Some(tool) = tool {
                         if let Some(callback) = &mut tool.callback {
                             callback(function_input.clone());
+                            // Notify that we're done
+                            status_update!(status_callback, super::ModelExecutionStatus::Done);
                             return Ok(());
                         } else {
+                            status_update!(
+                                status_callback,
+                                super::ModelExecutionStatus::Error("No callback registered for tool".to_string())
+                            );
                             return Err(anyhow::anyhow!("No callback registered for tool {}", function_name));
                         }
                     } else {
+                        status_update!(status_callback, super::ModelExecutionStatus::Error("No tool registered".to_string()));
                         return Err(anyhow::anyhow!("No tool registered with name {}", function_name));
                     }
                 }
@@ -180,6 +200,10 @@ impl LLMEngine for Anthropic {
             }
         }
 
+        status_update!(
+            status_callback,
+            super::ModelExecutionStatus::Error("No tool calls found in response".to_string())
+        );
         Err(anyhow::anyhow!("No tool calls found in response"))
     }
 }

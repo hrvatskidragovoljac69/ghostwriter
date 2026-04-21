@@ -1,15 +1,10 @@
-use super::LLMEngine;
+use super::{status_update, LLMEngine, Tool};
+use crate::cancellation::{with_cancellation, GhostwriterCancellation};
 use crate::util::{option_or_env, option_or_env_fallback, OptionMap};
 use anyhow::Result;
-use log::{debug, info};
+use log::debug;
 use serde_json::json;
 use serde_json::Value as json;
-
-pub struct Tool {
-    name: String,
-    definition: json,
-    callback: Option<Box<dyn FnMut(json)>>,
-}
 
 pub struct OpenAI {
     model: String,
@@ -20,22 +15,23 @@ pub struct OpenAI {
 }
 
 impl OpenAI {
-    fn openai_tool_definition(tool: &Tool) -> json {
-        json!({
-                "type": "function",
-                "function": {
-            "name": tool.definition["name"],
-            "description": tool.definition["description"],
-            "parameters": tool.definition["parameters"],
-                }
-        })
-    }
-
     pub fn add_content(&mut self, content: json) {
         self.content.push(content);
     }
+
+    fn tool_definition_json(tool: &Tool) -> json {
+        json!({
+            "type": "function",
+            "function": {
+                "name": tool.definition["name"],
+                "description": tool.definition["description"],
+                "parameters": tool.definition["parameters"],
+            }
+        })
+    }
 }
 
+#[async_trait::async_trait]
 impl LLMEngine for OpenAI {
     fn new(options: &OptionMap) -> Self {
         let api_key = option_or_env(options, "api_key", "OPENAI_API_KEY");
@@ -51,7 +47,7 @@ impl LLMEngine for OpenAI {
         }
     }
 
-    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json)>) {
+    fn register_tool(&mut self, name: &str, definition: json, callback: Box<dyn FnMut(json) + Send>) {
         self.tools.push(Tool {
             name: name.to_string(),
             definition,
@@ -79,41 +75,58 @@ impl LLMEngine for OpenAI {
         self.content.clear();
     }
 
-    fn execute(&mut self) -> Result<()> {
+    async fn execute(&mut self, cancellation: &GhostwriterCancellation, mut status_callback: Option<super::StatusCallback>) -> Result<()> {
         let body = json!({
             "model": self.model,
             "messages": [{
                 "role": "user",
                 "content": self.content
             }],
-            "tools": self.tools.iter().map(Self::openai_tool_definition).collect::<Vec<_>>(),
+            "tools": self.tools.iter().map(Self::tool_definition_json).collect::<Vec<_>>(),
             "tool_choice": "required",
             "parallel_tool_calls": false
         });
 
-        // print body for debugging
         debug!("Request: {}", body);
-        let raw_response = ureq::post(format!("{}/v1/chat/completions", self.base_url).as_str())
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(&body);
 
-        let mut response = match raw_response {
-            Ok(response) => response,
-            Err(err) => {
-                info!("API Error: {}", err);
-                return Err(anyhow::anyhow!("API ERROR: {}", err));
+        // Notify that we're building context
+        status_update!(status_callback, super::ModelExecutionStatus::BuildingContext);
+
+        // Notify that we're processing with LLM
+        status_update!(status_callback, super::ModelExecutionStatus::LlmProcessing);
+
+        // Create async HTTP request with cancellation support
+        let request_future = async {
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!("{}/v1/chat/completions", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!("API Error: {}", response.status()));
             }
+
+            let body_text = response.text().await?;
+            let json: json = serde_json::from_str(&body_text)?;
+            Ok(json)
         };
 
-        // Read response body as string
-        let body_text = response.body_mut().read_to_string().unwrap();
-        let json: json = serde_json::from_str(&body_text).unwrap();
+        let json: json = with_cancellation(request_future, cancellation).await?;
         debug!("Response: {}", json);
+
+        // Notify that we're processing the response
+        status_update!(status_callback, super::ModelExecutionStatus::ProcessingResponse);
 
         let tool_calls = &json["choices"][0]["message"]["tool_calls"];
 
         if let Some(tool_call) = tool_calls.get(0) {
+            // Notify that we're calling tools
+            status_update!(status_callback, super::ModelExecutionStatus::CallingTools);
+
             let function_name = tool_call["function"]["name"].as_str().unwrap();
             let function_input_raw = tool_call["function"]["arguments"].as_str().unwrap();
             let function_input = serde_json::from_str::<json>(function_input_raw).unwrap();
@@ -122,14 +135,25 @@ impl LLMEngine for OpenAI {
             if let Some(tool) = tool {
                 if let Some(callback) = &mut tool.callback {
                     callback(function_input.clone());
+                    // Notify that we're done
+                    status_update!(status_callback, super::ModelExecutionStatus::Done);
                     Ok(())
                 } else {
+                    status_update!(
+                        status_callback,
+                        super::ModelExecutionStatus::Error("No callback registered for tool".to_string())
+                    );
                     Err(anyhow::anyhow!("No callback registered for tool {}", function_name))
                 }
             } else {
+                status_update!(status_callback, super::ModelExecutionStatus::Error("No tool registered".to_string()));
                 Err(anyhow::anyhow!("No tool registered with name {}", function_name))
             }
         } else {
+            status_update!(
+                status_callback,
+                super::ModelExecutionStatus::Error("No tool calls found in response".to_string())
+            );
             Err(anyhow::anyhow!("No tool calls found in response"))
         }
     }

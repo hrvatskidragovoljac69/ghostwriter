@@ -7,27 +7,46 @@ use std::io::{Read, Seek};
 use std::process;
 
 use base64::{engine::general_purpose, Engine as _};
-use image::ImageEncoder;
+use image::{GenericImageView, ImageEncoder};
 
 use crate::device::DeviceModel;
+use crate::simulation::{ScreenshotSimulator, SimulationConfig};
 
 const VIRTUAL_WIDTH: u32 = 768;
 const VIRTUAL_HEIGHT: u32 = 1024;
 
+pub enum ScreenshotMode {
+    Real { data: Vec<u8>, device_model: DeviceModel },
+    Simulated { simulator: ScreenshotSimulator },
+}
+
 pub struct Screenshot {
-    data: Vec<u8>,
-    device_model: DeviceModel,
+    mode: ScreenshotMode,
 }
 
 impl Screenshot {
     pub fn new() -> Result<Screenshot> {
         let device_model = DeviceModel::detect();
         info!("Screen detected device: {}", device_model.name());
-        Ok(Screenshot { data: vec![], device_model })
+        Ok(Screenshot {
+            mode: ScreenshotMode::Real { data: vec![], device_model },
+        })
+    }
+
+    pub fn new_simulated(simulation_config: SimulationConfig) -> Result<Screenshot> {
+        let simulator = ScreenshotSimulator::new(simulation_config)?;
+        info!("Screen using simulation mode");
+        Ok(Screenshot {
+            mode: ScreenshotMode::Simulated { simulator },
+        })
     }
 
     fn screen_width(&self) -> u32 {
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::Remarkable2 => 1872,
             DeviceModel::RemarkablePaperPro => 1632,
             DeviceModel::Unknown => 1872, // Default to RM2
@@ -35,7 +54,11 @@ impl Screenshot {
     }
 
     fn screen_height(&self) -> u32 {
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::Remarkable2 => 1404,
             DeviceModel::RemarkablePaperPro => 2154,
             DeviceModel::Unknown => 1404, // Default to RM2
@@ -43,7 +66,11 @@ impl Screenshot {
     }
 
     pub fn bytes_per_pixel(&self) -> usize {
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::Remarkable2 => 2,
             DeviceModel::RemarkablePaperPro => 4,
             DeviceModel::Unknown => 2, // Default to RM2
@@ -51,6 +78,14 @@ impl Screenshot {
     }
 
     pub fn take_screenshot(&mut self) -> Result<()> {
+        if let ScreenshotMode::Simulated { simulator } = &mut self.mode {
+            // In simulation mode, just advance to next image
+            simulator.advance_to_next_image();
+            debug!("Simulated screenshot taken (advanced to next test image)");
+            return Ok(());
+        }
+
+        // For real mode, handle separately to avoid borrowing issues
         // Find xochitl's process
         debug!("screenshot: finding pid");
         let pid = Self::find_xochitl_pid()?;
@@ -62,11 +97,15 @@ impl Screenshot {
         // Read the framebuffer data
         debug!("screenshot: reading data");
         let screenshot_data = self.read_framebuffer(&pid, skip_bytes)?;
+
         // Process the image data (transpose, color correction, etc.)
         debug!("screenshot: processing image");
         let processed_data = self.process_image(screenshot_data)?;
 
-        self.data = processed_data;
+        // Update the data
+        if let ScreenshotMode::Real { data, .. } = &mut self.mode {
+            *data = processed_data;
+        }
 
         Ok(())
     }
@@ -87,7 +126,11 @@ impl Screenshot {
     }
 
     fn find_framebuffer_address(&self, pid: &str) -> Result<u64> {
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::RemarkablePaperPro => {
                 // For RMPP (arm64), we need to use the approach from pointer_arm64.go
                 let start_address = self.get_memory_range(pid)?;
@@ -196,7 +239,11 @@ impl Screenshot {
         let encoder = image::codecs::png::PngEncoder::new(&mut resized_png_data);
 
         // Handle different color types based on device
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::RemarkablePaperPro => {
                 encoder.write_image(
                     resized_img.as_rgba8().unwrap().as_raw(),
@@ -219,7 +266,11 @@ impl Screenshot {
     }
 
     fn encode_png(&self, raw_data: &[u8]) -> Result<Vec<u8>> {
-        match self.device_model {
+        let device_model = match &self.mode {
+            ScreenshotMode::Real { device_model, .. } => device_model,
+            ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
+        };
+        match device_model {
             DeviceModel::RemarkablePaperPro => {
                 // RMPP uses 32-bit RGBA format
                 self.encode_png_rmpp(raw_data)
@@ -279,14 +330,43 @@ impl Screenshot {
     }
 
     pub fn save_image(&self, filename: &str) -> Result<()> {
-        let mut png_file = File::create(filename)?;
-        png_file.write_all(&self.data)?;
-        debug!("PNG image saved to {}", filename);
-        Ok(())
+        match &self.mode {
+            ScreenshotMode::Simulated { simulator } => {
+                simulator.save_image(filename)?;
+                debug!("Simulated PNG image saved to {}", filename);
+                Ok(())
+            }
+            ScreenshotMode::Real { data, .. } => {
+                let mut png_file = File::create(filename)?;
+                png_file.write_all(data)?;
+                debug!("PNG image saved to {}", filename);
+                Ok(())
+            }
+        }
     }
 
     pub fn base64(&self) -> Result<String> {
-        let base64_image = general_purpose::STANDARD.encode(&self.data);
-        Ok(base64_image)
+        match &self.mode {
+            ScreenshotMode::Simulated { simulator } => simulator.get_base64_image(),
+            ScreenshotMode::Real { data, .. } => {
+                let base64_image = general_purpose::STANDARD.encode(data);
+                Ok(base64_image)
+            }
+        }
+    }
+
+    /// Return the (r, g, b) pixel value at virtual coordinate (vx, vy) in the 768×1024 space.
+    /// Decodes the stored PNG on each call. Returns None if no screenshot data available.
+    pub fn get_pixel(&self, vx: u32, vy: u32) -> Option<(u8, u8, u8)> {
+        let data = match &self.mode {
+            ScreenshotMode::Real { data, .. } if !data.is_empty() => data,
+            ScreenshotMode::Simulated { simulator } => {
+                return simulator.get_pixel(vx, vy);
+            }
+            _ => return None,
+        };
+        let img = image::load_from_memory(data).ok()?;
+        let pixel = img.get_pixel(vx, vy);
+        Some((pixel[0], pixel[1], pixel[2]))
     }
 }

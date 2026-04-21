@@ -1,3 +1,4 @@
+use crate::device::DeviceModel;
 use crate::touch::TriggerCorner;
 use anyhow::Result;
 use figment::{
@@ -6,7 +7,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Config {
     // Direct mapping to CLI args - no arbitrary grouping
     pub engine: Option<String>,
@@ -32,6 +33,13 @@ pub struct Config {
     pub thinking_tokens: u32,
     pub log_level: String,
     pub trigger_corner: String,
+    // Simulation/test mode options
+    pub test_mode: Option<String>,
+    pub test_device_model: Option<DeviceModel>,
+    pub test_touch_events_file: Option<String>,
+    pub test_screenshot_dir: Option<String>,
+    pub test_auto_trigger_delay: Option<u32>, // seconds
+    pub test_interaction_log: Option<String>,
 }
 
 impl Default for Config {
@@ -60,6 +68,13 @@ impl Default for Config {
             thinking_tokens: 5000,
             log_level: "info".to_string(),
             trigger_corner: "UR".to_string(),
+            // Simulation/test mode defaults
+            test_mode: None,
+            test_device_model: None,
+            test_touch_events_file: None,
+            test_screenshot_dir: None,
+            test_auto_trigger_delay: None,
+            test_interaction_log: None,
         }
     }
 }
@@ -108,10 +123,10 @@ impl Config {
         TriggerCorner::from_string(&self.trigger_corner)?;
 
         // Validate log level
-        match self.log_level.as_str() {
-            "error" | "warn" | "info" | "debug" | "trace" => {}
-            _ => return Err(anyhow::anyhow!("Invalid log level: {}", self.log_level)),
-        }
+        // match self.log_level.as_str() {
+        //     "error" | "warn" | "info" | "debug" | "trace" => {}
+        //     _ => return Err(anyhow::anyhow!("Invalid log level: {}", self.log_level)),
+        // }
 
         // Validate thinking tokens
         if self.thinking_tokens == 0 {
@@ -119,5 +134,15 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Check if test mode is enabled
+    pub fn is_test_mode(&self) -> bool {
+        self.test_mode.is_some()
+    }
+
+    /// Get the test device model, or None if not in test mode
+    pub fn get_test_device_model(&self) -> Option<DeviceModel> {
+        self.test_device_model
     }
 }

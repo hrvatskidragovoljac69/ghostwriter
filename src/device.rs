@@ -1,6 +1,8 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DeviceModel {
     Remarkable2,
     RemarkablePaperPro,
@@ -8,6 +10,14 @@ pub enum DeviceModel {
 }
 
 impl DeviceModel {
+    pub fn from_string(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "rm2" | "remarkable2" | "remarkable-2" => Ok(DeviceModel::Remarkable2),
+            "rmpp" | "remarkable-paper-pro" | "remarkablepaperpro" | "paperpro" => Ok(DeviceModel::RemarkablePaperPro),
+            _ => Err(anyhow::anyhow!("Invalid device model: {}. Use 'rm2' or 'rmpp'", s)),
+        }
+    }
+
     pub fn detect() -> Self {
         if Path::new("/etc/hwrevision").exists() {
             if let Ok(hwrev) = std::fs::read_to_string("/etc/hwrevision") {
