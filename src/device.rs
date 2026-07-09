@@ -6,6 +6,7 @@ use std::path::Path;
 pub enum DeviceModel {
     Remarkable2,
     RemarkablePaperPro,
+    RemarkablePaperPure,
     Unknown,
 }
 
@@ -14,6 +15,7 @@ impl DeviceModel {
         match s.to_lowercase().as_str() {
             "rm2" | "remarkable2" | "remarkable-2" => Ok(DeviceModel::Remarkable2),
             "rmpp" | "remarkable-paper-pro" | "remarkablepaperpro" | "paperpro" => Ok(DeviceModel::RemarkablePaperPro),
+            "rmpure" | "tatsu" | "paperpure" => Ok(DeviceModel::RemarkablePaperPure),
             _ => Err(anyhow::anyhow!("Invalid device model: {}. Use 'rm2' or 'rmpp'", s)),
         }
     }
@@ -27,6 +29,9 @@ impl DeviceModel {
                 if hwrev.contains("reMarkable2 1.0") {
                     return DeviceModel::Remarkable2;
                 }
+                if hwrev.contains("tatsu 1.0") {
+                    return DeviceModel::RemarkablePaperPure;
+                }
             }
         }
 
@@ -38,6 +43,7 @@ impl DeviceModel {
         match self {
             DeviceModel::Remarkable2 => "Remarkable2",
             DeviceModel::RemarkablePaperPro => "RemarkablePaperPro",
+            DeviceModel::RemarkablePaperPure => "RemarkablePaperPure",
             DeviceModel::Unknown => "Unknown",
         }
     }

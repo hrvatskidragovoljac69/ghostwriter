@@ -83,6 +83,7 @@ impl Touch {
         let device_path = match device_model {
             DeviceModel::Remarkable2 => "/dev/input/event2",
             DeviceModel::RemarkablePaperPro => "/dev/input/event3",
+            DeviceModel::RemarkablePaperPure => "/dev/input/event3",
             DeviceModel::Unknown => "/dev/input/event2", // Default to RM2
         };
 
@@ -511,7 +512,7 @@ impl Touch {
         let (screen_width, screen_height) = Self::screen_dimensions(device_model);
 
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 let x_input = (x_normalized * screen_width as f32) as i32;
                 let y_input = (y_normalized * screen_height as f32) as i32;
                 (x_input, y_input)
@@ -532,7 +533,7 @@ impl Touch {
         let y_normalized = y as f32 / screen_height as f32;
 
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 let x_input = (x_normalized * VIRTUAL_WIDTH as f32) as i32;
                 let y_input = (y_normalized * VIRTUAL_HEIGHT as f32) as i32;
                 (x_input, y_input)
@@ -550,6 +551,7 @@ impl Touch {
         match device_model {
             DeviceModel::Remarkable2 => (1404, 1872),
             DeviceModel::RemarkablePaperPro => (2065, 2833),
+            DeviceModel::RemarkablePaperPure => (1776, 2400),
             DeviceModel::Unknown => (1404, 1872), // Default to RM2
         }
     }

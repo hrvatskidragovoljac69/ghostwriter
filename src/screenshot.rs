@@ -49,6 +49,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => 1872,
             DeviceModel::RemarkablePaperPro => 1632,
+            DeviceModel::RemarkablePaperPure => 1404,
             DeviceModel::Unknown => 1872, // Default to RM2
         }
     }
@@ -61,6 +62,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => 1404,
             DeviceModel::RemarkablePaperPro => 2154,
+            DeviceModel::RemarkablePaperPure => 1872,
             DeviceModel::Unknown => 1404, // Default to RM2
         }
     }
@@ -73,6 +75,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => Self::detect_rm2_bytes_per_pixel(),
             DeviceModel::RemarkablePaperPro => 4,
+            DeviceModel::RemarkablePaperPure => 4,
             DeviceModel::Unknown => 2, // Default to RM2
         }
     }
@@ -163,7 +166,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 // For RMPP (arm64), we need to use the approach from pointer_arm64.go
                 let start_address = self.get_memory_range(pid)?;
                 let frame_pointer = self.calculate_frame_pointer(pid, start_address)?;
@@ -279,7 +282,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 encoder.write_image(
                     resized_img.as_rgba8().unwrap().as_raw(),
                     VIRTUAL_WIDTH,
@@ -306,7 +309,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 // RMPP uses 32-bit RGBA format
                 self.encode_png_rmpp(raw_data)
             }

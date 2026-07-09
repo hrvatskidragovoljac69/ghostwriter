@@ -27,6 +27,7 @@ impl Pen {
         let pen_input_device = match device_model {
             DeviceModel::Remarkable2 => "/dev/input/event1",
             DeviceModel::RemarkablePaperPro => "/dev/input/event2",
+            DeviceModel::RemarkablePaperPure => "/dev/input/event2",
             DeviceModel::Unknown => "/dev/input/event1", // Default to RM2
         };
 
@@ -197,6 +198,7 @@ impl Pen {
         match self.device_model {
             DeviceModel::Remarkable2 => 15725,
             DeviceModel::RemarkablePaperPro => 11180,
+            DeviceModel::RemarkablePaperPure => 9620,
             DeviceModel::Unknown => 15725, // Default to RM2
         }
     }
@@ -205,6 +207,7 @@ impl Pen {
         match self.device_model {
             DeviceModel::Remarkable2 => 20966,
             DeviceModel::RemarkablePaperPro => 15340,
+            DeviceModel::RemarkablePaperPure => 13000,
             DeviceModel::Unknown => 20966, // Default to RM2
         }
     }
@@ -639,7 +642,7 @@ impl Pen {
         let y_normalized = y as f32 / VIRTUAL_HEIGHT as f32;
 
         match self.device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 let x_input = (x_normalized * self.max_x_value() as f32) as i32;
                 let y_input = (y_normalized * self.max_y_value() as f32) as i32;
                 (x_input, y_input)
