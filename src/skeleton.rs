@@ -1,10 +1,9 @@
-/// Zhang-Suen thinning and skeleton-to-polyline tracing.
-///
-/// Converts a filled binary image to 1-pixel-wide skeleton paths.
-
+//! Zhang-Suen thinning and skeleton-to-polyline tracing.
+//!
+//! Converts a filled binary image to 1-pixel-wide skeleton paths.
 /// Apply Zhang-Suen thinning algorithm in-place.
 /// `grid[row][col]` = true means ink pixel.
-pub fn thin_zhang_suen(grid: &mut Vec<Vec<bool>>) {
+pub fn thin_zhang_suen(grid: &mut [Vec<bool>]) {
     let rows = grid.len();
     if rows < 3 {
         return;
@@ -114,9 +113,7 @@ pub fn smooth_path(path: &[(f32, f32)], window: usize) -> Vec<(f32, f32)> {
             let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
             let count = (end - start) as f32;
-            let (sx, sy) = path[start..end]
-                .iter()
-                .fold((0.0f32, 0.0f32), |(ax, ay), &(x, y)| (ax + x, ay + y));
+            let (sx, sy) = path[start..end].iter().fold((0.0f32, 0.0f32), |(ax, ay), &(x, y)| (ax + x, ay + y));
             (sx / count, sy / count)
         })
         .collect()
@@ -124,7 +121,7 @@ pub fn smooth_path(path: &[(f32, f32)], window: usize) -> Vec<(f32, f32)> {
 
 /// Trace a thinned skeleton image into a list of (x, y) polylines in pixel space.
 /// Coordinates are (col, row) = (x, y).
-pub fn trace_skeleton(grid: &Vec<Vec<bool>>) -> Vec<Vec<(f32, f32)>> {
+pub fn trace_skeleton(grid: &[Vec<bool>]) -> Vec<Vec<(f32, f32)>> {
     let rows = grid.len();
     if rows == 0 {
         return vec![];
@@ -150,19 +147,13 @@ pub fn trace_skeleton(grid: &Vec<Vec<bool>>) -> Vec<Vec<(f32, f32)>> {
 
     // Trace a path starting from (start_r, start_c), following unvisited neighbors.
     // At junctions, prefer the neighbor most aligned with current direction of travel.
-    let trace_from = |start_r: usize,
-                      start_c: usize,
-                      visited: &mut Vec<Vec<bool>>|
-     -> Vec<(f32, f32)> {
+    let trace_from = |start_r: usize, start_c: usize, visited: &mut Vec<Vec<bool>>| -> Vec<(f32, f32)> {
         let mut path = vec![(start_c as f32, start_r as f32)];
         visited[start_r][start_c] = true;
         let mut curr = (start_r, start_c);
 
         loop {
-            let unvisited: Vec<(usize, usize)> = on_neighbors(grid, curr.0, curr.1)
-                .into_iter()
-                .filter(|&(nr, nc)| !visited[nr][nc])
-                .collect();
+            let unvisited: Vec<(usize, usize)> = on_neighbors(grid, curr.0, curr.1).into_iter().filter(|&(nr, nc)| !visited[nr][nc]).collect();
 
             if unvisited.is_empty() {
                 break;

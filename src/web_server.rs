@@ -186,6 +186,7 @@ async fn get_status_handler(shared_status: Arc<TokioRwLock<GhostwriterStatus>>) 
 
 #[derive(Debug)]
 enum ConfigError {
+    #[allow(dead_code)]
     Load(String),
     Save(String),
     Validation(String),
