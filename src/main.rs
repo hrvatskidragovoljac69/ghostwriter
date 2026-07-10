@@ -559,7 +559,13 @@ async fn run_ghostwriter_loop(
 }
 
 // Helper function to register tools with the engine
-fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>>, pen: Arc<Mutex<Pen>>, _touch: Arc<TokioRwLock<Touch>>, config: &Config) -> Result<()> {
+fn register_tools(
+    engine: &mut Box<dyn LLMEngine>,
+    keyboard: Arc<Mutex<Keyboard>>,
+    pen: Arc<Mutex<Pen>>,
+    _touch: Arc<TokioRwLock<Touch>>,
+    config: &Config,
+) -> Result<()> {
     use serde_json::Value as json;
 
     // Register draw_text tool
@@ -624,10 +630,9 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
                 // holds the shared touch RwLock indefinitely while waiting for user trigger
                 let previous_tool = if !no_draw && !test_mode {
                     tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            Touch::new(false, TriggerCorner::UpperRight).select_fineliner().await
-                        })
-                    }).unwrap_or(PenTool::Unknown)
+                        tokio::runtime::Handle::current().block_on(async { Touch::new(false, TriggerCorner::UpperRight).select_fineliner().await })
+                    })
+                    .unwrap_or(PenTool::Unknown)
                 } else {
                     PenTool::Unknown
                 };
@@ -643,10 +648,9 @@ fn register_tools(engine: &mut Box<dyn LLMEngine>, keyboard: Arc<Mutex<Keyboard>
                 // Restore the original tool after drawing
                 if !no_draw && !test_mode && previous_tool != PenTool::Unknown {
                     tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            Touch::new(false, TriggerCorner::UpperRight).restore_tool(previous_tool).await
-                        })
-                    }).ok();
+                        tokio::runtime::Handle::current().block_on(async { Touch::new(false, TriggerCorner::UpperRight).restore_tool(previous_tool).await })
+                    })
+                    .ok();
                 }
             }),
         );

@@ -27,6 +27,7 @@ impl Pen {
         let pen_input_device = match device_model {
             DeviceModel::Remarkable2 => "/dev/input/event1",
             DeviceModel::RemarkablePaperPro => "/dev/input/event2",
+            DeviceModel::RemarkablePaperPure => "/dev/input/event2",
             DeviceModel::Unknown => "/dev/input/event1", // Default to RM2
         };
 
@@ -197,6 +198,7 @@ impl Pen {
         match self.device_model {
             DeviceModel::Remarkable2 => 15725,
             DeviceModel::RemarkablePaperPro => 11180,
+            DeviceModel::RemarkablePaperPure => 9620,
             DeviceModel::Unknown => 15725, // Default to RM2
         }
     }
@@ -205,6 +207,7 @@ impl Pen {
         match self.device_model {
             DeviceModel::Remarkable2 => 20966,
             DeviceModel::RemarkablePaperPro => 15340,
+            DeviceModel::RemarkablePaperPure => 13000,
             DeviceModel::Unknown => 20966, // Default to RM2
         }
     }
@@ -215,13 +218,7 @@ impl Pen {
 
     // Draw a single segment from prev to (px,py), emitting interpolated goto_xy events.
     // Returns updated step_count.
-    fn draw_segment(
-        &mut self,
-        prev: (f32, f32),
-        (px, py): (f32, f32),
-        step_count: &mut usize,
-        max_step: f32,
-    ) -> Result<()> {
+    fn draw_segment(&mut self, prev: (f32, f32), (px, py): (f32, f32), step_count: &mut usize, max_step: f32) -> Result<()> {
         let dist = ((px - prev.0).powi(2) + (py - prev.1).powi(2)).sqrt();
         let steps = ((dist / max_step).ceil() as usize).max(1);
         for s in 1..=steps {
@@ -373,30 +370,20 @@ impl Pen {
 
             // Even rows: L→R, odd rows: R→L
             let go_left = (y % 2) == 1;
-            let ordered_runs: Vec<(usize, usize)> = if go_left {
-                runs.iter().rev().cloned().collect()
-            } else {
-                runs.clone()
-            };
+            let ordered_runs: Vec<(usize, usize)> = if go_left { runs.iter().rev().cloned().collect() } else { runs.clone() };
 
             for (x_start, x_end) in ordered_runs {
                 // For L→R draw start→end; for R→L draw end→start
-                let (draw_from, draw_to) = if go_left {
-                    (x_end, x_start)
-                } else {
-                    (x_start, x_end)
-                };
+                let (draw_from, draw_to) = if go_left { (x_end, x_start) } else { (x_start, x_end) };
 
                 let ix_from = ((draw_from as f32 / bmp_w) * max_x).round() as i32;
                 let ix_to = ((draw_to as f32 / bmp_w) * max_x).round() as i32;
 
                 if is_pen_down {
                     self.pen_up()?;
-                    is_pen_down = false;
                     sleep(Duration::from_millis(1));
                 }
                 self.pen_down_at((ix_from, iy))?;
-                is_pen_down = true;
                 sleep(Duration::from_millis(1));
                 self.goto_xy((ix_to, iy))?;
                 self.pen_up()?;
@@ -428,6 +415,7 @@ impl Pen {
         let rows = bitmap.len();
         let cols = bitmap[0].len();
 
+        #[allow(clippy::needless_range_loop)]
         for x in 0..cols {
             let ix = ((x as f32 / bmp_w) * max_x).round() as i32;
 
@@ -511,7 +499,6 @@ impl Pen {
 
             if is_pen_down {
                 self.pen_up()?;
-                is_pen_down = false;
             }
             sleep(Duration::from_millis(5));
         }
@@ -533,10 +520,10 @@ impl Pen {
             ])?;
             // Press with given pressure
             device.send_events(&[
-                InputEvent::new(EvdevEventType::KEY.0, 330, 1),           // BTN_TOUCH
+                InputEvent::new(EvdevEventType::KEY.0, 330, 1),            // BTN_TOUCH
                 InputEvent::new(EvdevEventType::ABSOLUTE.0, 24, pressure), // ABS_PRESSURE
-                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 0),       // ABS_DISTANCE = 0
-                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0), // SYN_REPORT
+                InputEvent::new(EvdevEventType::ABSOLUTE.0, 25, 0),        // ABS_DISTANCE = 0
+                InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0),  // SYN_REPORT
             ])?;
         }
         Ok(())
@@ -554,8 +541,7 @@ impl Pen {
         let write_opt = usvg::WriteOptions::default(); // preserve_text=false → converts text to paths
         let flattened_svg = tree.to_string(&write_opt);
 
-        let polylines = svg2polylines::parse(&flattened_svg, 0.5, true)
-            .map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
+        let polylines = svg2polylines::parse(&flattened_svg, 0.5, true).map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
         info!("draw_svg_paths: {} polylines", polylines.len());
         self.draw_polylines(&polylines)
     }
@@ -599,11 +585,7 @@ impl Pen {
         // Rasterize at 2× for better thinning quality, then scale coords back
         let scale = 2u32;
         let mut bitmap = svg_to_bitmap(svg_data, VIRTUAL_WIDTH * scale, VIRTUAL_HEIGHT * scale)?;
-        info!(
-            "draw_svg_centerline: rasterized {}×{} bitmap",
-            VIRTUAL_WIDTH * scale,
-            VIRTUAL_HEIGHT * scale
-        );
+        info!("draw_svg_centerline: rasterized {}×{} bitmap", VIRTUAL_WIDTH * scale, VIRTUAL_HEIGHT * scale);
 
         skeleton::thin_zhang_suen(&mut bitmap);
         info!("draw_svg_centerline: thinning done");
@@ -627,8 +609,7 @@ impl Pen {
     /// Draw SVG using path tracing, passing SVG directly to svg2polylines without usvg preprocessing.
     /// Better for geometric shapes (lines, rects, circles), but text won't render.
     pub fn draw_svg_paths_raw(&mut self, svg_data: &str) -> Result<()> {
-        let polylines = svg2polylines::parse(svg_data, 0.5, true)
-            .map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
+        let polylines = svg2polylines::parse(svg_data, 0.5, true).map_err(|e| anyhow::anyhow!("svg2polylines error: {}", e))?;
         info!("draw_svg_paths_raw: {} polylines", polylines.len());
         self.draw_polylines(&polylines)
     }
@@ -639,7 +620,7 @@ impl Pen {
         let y_normalized = y as f32 / VIRTUAL_HEIGHT as f32;
 
         match self.device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 let x_input = (x_normalized * self.max_x_value() as f32) as i32;
                 let y_input = (y_normalized * self.max_y_value() as f32) as i32;
                 (x_input, y_input)

@@ -49,6 +49,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => 1872,
             DeviceModel::RemarkablePaperPro => 1632,
+            DeviceModel::RemarkablePaperPure => 1404,
             DeviceModel::Unknown => 1872, // Default to RM2
         }
     }
@@ -61,6 +62,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => 1404,
             DeviceModel::RemarkablePaperPro => 2154,
+            DeviceModel::RemarkablePaperPure => 1872,
             DeviceModel::Unknown => 1404, // Default to RM2
         }
     }
@@ -73,6 +75,7 @@ impl Screenshot {
         match device_model {
             DeviceModel::Remarkable2 => Self::detect_rm2_bytes_per_pixel(),
             DeviceModel::RemarkablePaperPro => 4,
+            DeviceModel::RemarkablePaperPure => 4,
             DeviceModel::Unknown => 2, // Default to RM2
         }
     }
@@ -99,14 +102,22 @@ impl Screenshot {
     // Firmware 3.24+ changed RM2 framebuffer from 16-bit (2 bpp) to 32-bit BGRA (4 bpp).
     fn detect_rm2_bytes_per_pixel() -> usize {
         let (major, minor) = Self::detect_rm2_firmware_version();
-        if major > 3 || (major == 3 && minor >= 24) { 4 } else { 2 }
+        if major > 3 || (major == 3 && minor >= 24) {
+            4
+        } else {
+            2
+        }
     }
 
     // Memory offset within the post-fb0 mapping where the current framebuffer data starts.
     // Reference: goMarkableStream internal/remarkable/detect.go
     fn detect_rm2_pointer_offset() -> u64 {
         let (major, minor) = Self::detect_rm2_firmware_version();
-        if major > 3 || (major == 3 && minor >= 24) { 2629632 } else { 0 }
+        if major > 3 || (major == 3 && minor >= 24) {
+            2629632
+        } else {
+            0
+        }
     }
 
     pub fn take_screenshot(&mut self) -> Result<()> {
@@ -163,7 +174,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 // For RMPP (arm64), we need to use the approach from pointer_arm64.go
                 let start_address = self.get_memory_range(pid)?;
                 let frame_pointer = self.calculate_frame_pointer(pid, start_address)?;
@@ -179,7 +190,12 @@ impl Screenshot {
                 let address_hex = String::from_utf8(output.stdout)?.trim().to_string();
                 let address = u64::from_str_radix(&address_hex, 16)?;
                 let pointer_offset = Self::detect_rm2_pointer_offset();
-                debug!("RM2 framebuffer: base={:#x}, pointer_offset={}, total={:#x}", address, pointer_offset, address + pointer_offset + 8);
+                debug!(
+                    "RM2 framebuffer: base={:#x}, pointer_offset={}, total={:#x}",
+                    address,
+                    pointer_offset,
+                    address + pointer_offset + 8
+                );
                 Ok(address + pointer_offset + 8)
             }
         }
@@ -236,7 +252,7 @@ impl Screenshot {
             file.seek(std::io::SeekFrom::Start(start_address + offset + 8))?;
             let mut header = [0u8; 8];
             file.read_exact(&mut header)?;
-            debug!("  ... header: {:?}", &header);
+            debug!("  ... header: {:?}", header);
 
             length = (header[0] as u64) | ((header[1] as u64) << 8) | ((header[2] as u64) << 16) | ((header[3] as u64) << 24);
             debug!("  ... length: {}", length);
@@ -279,7 +295,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 encoder.write_image(
                     resized_img.as_rgba8().unwrap().as_raw(),
                     VIRTUAL_WIDTH,
@@ -306,7 +322,7 @@ impl Screenshot {
             ScreenshotMode::Simulated { .. } => &DeviceModel::Unknown, // Default for simulation
         };
         match device_model {
-            DeviceModel::RemarkablePaperPro => {
+            DeviceModel::RemarkablePaperPro | DeviceModel::RemarkablePaperPure => {
                 // RMPP uses 32-bit RGBA format
                 self.encode_png_rmpp(raw_data)
             }
@@ -330,7 +346,8 @@ impl Screenshot {
         } else {
             // Pre-3.24: data is stored landscape (1872×1404), 16-bit RGB565. Take high byte.
             let processed: Vec<u8> = raw_data.chunks_exact(2).map(|chunk| Self::apply_curves(chunk[1])).collect();
-            let img = GrayImage::from_raw(self.screen_width(), self.screen_height(), processed).ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
+            let img = GrayImage::from_raw(self.screen_width(), self.screen_height(), processed)
+                .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw data"))?;
             let rotated_img = image::imageops::rotate270(&img);
             let final_image = image::imageops::flip_horizontal(&rotated_img);
             encoder.write_image(final_image.as_raw(), final_image.width(), final_image.height(), image::ExtendedColorType::L8)?;
