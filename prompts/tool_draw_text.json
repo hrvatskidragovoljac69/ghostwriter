@@ -25,6 +25,20 @@
         "type": "string",
         "enum": ["play", "pause", "next", "previous"],
         "description": "Optional. Control playback of the household music system."
+      },
+      "spotify_playlist": {
+        "type": "string",
+        "description": "Optional. The name of one of the writer's own Spotify playlists to play. Use ONLY when they name a playlist explicitly."
+      },
+      "spotify_queue": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Optional. An ordered list of 4-6 searches, each 'Artist - Track'. The first plays immediately, the rest queue behind it. Use when asked for music by genre or mood rather than by playlist. Choose real, well-known recordings you are confident exist."
+      },
+      "spotify_action": {
+        "type": "string",
+        "enum": ["play", "pause", "next", "previous"],
+        "description": "Optional. Basic playback control."
       }
     },
     "required": [
