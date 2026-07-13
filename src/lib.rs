@@ -14,3 +14,4 @@ pub mod status;
 pub mod touch;
 pub mod util;
 pub mod web_server;
+pub mod spotify;
