@@ -591,15 +591,20 @@ fn register_tools(
                 }
             }
 			// Spotify side-effect, if requested
-			let search = arguments["spotify_search"].as_str().map(str::to_string);
+			let playlist = arguments["spotify_playlist"].as_str().map(str::to_string);
+			let queue: Option<Vec<String>> = arguments["spotify_queue"].as_array()
+			    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
 			let action = arguments["spotify_action"].as_str().map(str::to_string);
-			if search.is_some() || action.is_some() {
+			
+			if playlist.is_some() || queue.is_some() || action.is_some() {
 			    match ghostwriter::spotify::Spotify::from_env() {
 			        Some(spotify) => {
 			            tokio::task::block_in_place(|| {
 			                tokio::runtime::Handle::current().block_on(async {
-			                    let result = if let Some(q) = &search {
-			                        spotify.search_and_play(q).await
+			                    let result = if let Some(p) = &playlist {
+			                        spotify.play_playlist(p).await
+			                    } else if let Some(q) = &queue {
+			                        spotify.queue_tracks(q).await
 			                    } else if let Some(a) = &action {
 			                        spotify.control(a).await
 			                    } else {
