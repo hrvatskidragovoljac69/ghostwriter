@@ -65,8 +65,8 @@ impl Spotify {
         let resp = match action {
             "play"     => client.put(format!("{}/play", base)).bearer_auth(&token).send().await?,
             "pause"    => client.put(format!("{}/pause", base)).bearer_auth(&token).send().await?,
-            "next"     => client.post(format!("{}/next", base)).bearer_auth(&token).send().await?,
-            "previous" => client.post(format!("{}/previous", base)).bearer_auth(&token).send().await?,
+            "next"     => client.post(format!("{}/next", base)).bearer_auth(&token).header("Content-Length", "0").body("").send().await?,
+            "previous" => client.post(format!("{}/previous", base)).bearer_auth(&token).header("Content-Length", "0").body("").send().await?,
             other => anyhow::bail!("unknown spotify action: {}", other),
         };
         resp.error_for_status()?;
