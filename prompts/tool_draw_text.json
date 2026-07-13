@@ -16,6 +16,15 @@
       "text": {
         "type": "string",
         "description": "Text to be written"
+      },
+      "spotify_search": {
+        "type": "string",
+        "description": "Optional. A track, artist, album, or mood to find and play on the household music system. Use this when music would suit the moment, whether or not it was explicitly requested."
+      },
+      "spotify_action": {
+        "type": "string",
+        "enum": ["play", "pause", "next", "previous"],
+        "description": "Optional. Control playback of the household music system."
       }
     },
     "required": [
