@@ -590,6 +590,30 @@ fn register_tools(
                     log::error!("Failed to write output file: {}", e);
                 }
             }
+			// Spotify side-effect, if requested
+			let search = arguments["spotify_search"].as_str().map(str::to_string);
+			let action = arguments["spotify_action"].as_str().map(str::to_string);
+			if search.is_some() || action.is_some() {
+			    match ghostwriter::spotify::Spotify::from_env() {
+			        Some(spotify) => {
+			            tokio::task::block_in_place(|| {
+			                tokio::runtime::Handle::current().block_on(async {
+			                    let result = if let Some(q) = &search {
+			                        spotify.search_and_play(q).await
+			                    } else if let Some(a) = &action {
+			                        spotify.control(a).await
+			                    } else {
+			                        Ok(())
+			                    };
+			                    if let Err(e) = result {
+			                        log::error!("Spotify error: {}", e);
+			                    }
+			                })
+			            });
+			        }
+			        None => log::warn!("Spotify requested but SPOTIFY_* env vars not set"),
+			    }
+			}
             if !no_draw {
                 if let Err(e) = draw_text(text, &mut lock!(keyboard_clone)) {
                     log::error!("Failed to draw text: {}", e);
